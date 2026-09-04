@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Chess.com Improvement Report</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="#/">
+    <span class="brand-mark" aria-hidden="true">♞</span>
+    <span class="brand-text">Improvement Report</span>
+  </a>
+  <form id="analyze-form" class="analyze-form" autocomplete="off">
+    <label class="sr-only" for="username">chess.com username</label>
+    <input id="username" name="username" type="text" placeholder="chess.com username" required spellcheck="false">
+    <button type="button" id="options-toggle" class="btn ghost" aria-expanded="false" aria-controls="options-panel">Options</button>
+    <button type="submit" class="btn primary" id="analyze-btn">Analyze</button>
+  </form>
+  <div class="topbar-right">
+    <button type="button" id="theme-toggle" class="btn ghost icon" title="Toggle light / dark">◐</button>
+  </div>
+</header>
+
+<section id="options-panel" class="options-panel" hidden>
+  <div class="opt">
+    <span class="opt-label">Engine depth</span>
+    <div class="seg" role="radiogroup" aria-label="engine depth">
+      <label><input type="radio" name="depth" value="10"> Quick <small>depth 10</small></label>
+      <label><input type="radio" name="depth" value="14" checked> Standard <small>depth 14</small></label>
+      <label><input type="radio" name="depth" value="18"> Deep <small>depth 18</small></label>
+    </div>
+  </div>
+  <div class="opt">
+    <label class="opt-label" for="max-games">Games to run through the engine</label>
+    <input id="max-games" type="number" min="0" max="2000" step="10" value="100">
+    <small>Most recent first. Every game is still downloaded and counted in the statistics.</small>
+  </div>
+  <div class="opt">
+    <span class="opt-label">Time classes for engine analysis</span>
+    <div class="checks">
+      <label><input type="checkbox" name="tc" value="bullet" checked> Bullet</label>
+      <label><input type="checkbox" name="tc" value="blitz" checked> Blitz</label>
+      <label><input type="checkbox" name="tc" value="rapid" checked> Rapid</label>
+      <label><input type="checkbox" name="tc" value="daily" checked> Daily</label>
+    </div>
+  </div>
+  <div class="opt">
+    <label class="opt-label" for="max-months">Months of history</label>
+    <input id="max-months" type="number" min="1" max="600" placeholder="all">
+    <small>Leave empty to download the full archive.</small>
+  </div>
+  <div class="opt">
+    <label><input type="checkbox" id="refresh"> Re-download months already cached</label>
+  </div>
+</section>
+
+<main id="app" class="app">
+  <section id="landing" class="landing">
+    <div class="landing-copy">
+      <h1>Every game you played, read back to you as a plan.</h1>
+      <p>Enter a chess.com username. The report downloads the complete game archive, runs each recent game through
+        Stockfish, and turns the results into the handful of things that actually cost you rating: the opening that
+        keeps losing, the phase where you blunder, the clock habits, the endgames you fail to convert.</p>
+      <ul class="feature-list">
+        <li><strong>Engine-graded moves</strong> with accuracy, centipawn loss and a reason for every mistake</li>
+        <li><strong>Repertoire map</strong> of what you play and how each line scores</li>
+        <li><strong>Clock analysis</strong>: where the time goes and what it costs</li>
+        <li><strong>Puzzles from your own games</strong>: the tactics you personally missed</li>
+      </ul>
+    </div>
+    <div class="landing-side">
+      <h2 class="eyebrow">Recent reports</h2>
+      <ul id="recent-players" class="recent-list"><li class="muted">None yet.</li></ul>
+      <p id="engine-status" class="muted small"></p>
+    </div>
+  </section>
+
+  <section id="progress" class="progress" hidden>
+    <div class="progress-head">
+      <h2 id="progress-title">Working…</h2>
+      <button type="button" id="cancel-btn" class="btn ghost">Cancel</button>
+    </div>
+    <ol class="stages">
+      <li data-stage="fetching"><span class="dot"></span>Download archive</li>
+      <li data-stage="analyzing"><span class="dot"></span>Engine analysis</li>
+      <li data-stage="reporting"><span class="dot"></span>Build report</li>
+    </ol>
+    <div class="bar"><div id="progress-bar" class="bar-fill"></div></div>
+    <p id="progress-detail" class="muted"></p>
+    <p id="progress-error" class="error" hidden></p>
+  </section>
+
+  <section id="report" class="report" hidden>
+    <aside class="side">
+      <div class="player-card" id="player-card"></div>
+      <nav class="tabs" id="tabs">
+        <a href="#/overview" data-tab="overview">Overview</a>
+        <a href="#/insights" data-tab="insights">Insights &amp; plan</a>
+        <a href="#/accuracy" data-tab="accuracy">Accuracy</a>
+        <a href="#/openings" data-tab="openings">Openings</a>
+        <a href="#/tactics" data-tab="tactics">Tactics</a>
+        <a href="#/time" data-tab="time">Clock</a>
+        <a href="#/endgames" data-tab="endgames">Endgames</a>
+        <a href="#/habits" data-tab="habits">Habits</a>
+        <a href="#/games" data-tab="games">Games</a>
+        <a href="#/training" data-tab="training">Training</a>
+      </nav>
+      <div class="side-foot">
+        <button type="button" id="rerun-btn" class="btn ghost small">Update with new games</button>
+      </div>
+    </aside>
+    <div class="content" id="content"></div>
+  </section>
+</main>
+
+<div id="viewer" class="viewer" hidden>
+  <div class="viewer-box" role="dialog" aria-modal="true" aria-labelledby="viewer-title">
+    <div class="viewer-head">
+      <h2 id="viewer-title">Game</h2>
+      <button type="button" id="viewer-close" class="btn ghost icon" aria-label="Close">✕</button>
+    </div>
+    <div id="viewer-body" class="viewer-body"></div>
+  </div>
+</div>
+
+<script src="/static/charts.js"></script>
+<script src="/static/board.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>
