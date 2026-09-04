@@ -334,12 +334,14 @@ def annotate(game: ParsedGame, evals: list[dict[str, Any]] | None,
     # first time the player went wrong in the opening (for the per-opening "typical mistake" stat)
     result["first_error"] = None
     if have_engine:
-        for m in moves_out:
+        for idx, m in enumerate(moves_out):
             if m["color"] == game.player_color and m.get("class") in ("inaccuracy", "mistake", "blunder"):
                 if m["phase"] != "opening":
                     break
                 result["first_error"] = {"ply": m["ply"], "san": m["san"], "best_san": m.get("best_san"),
-                                         "class": m["class"], "win_loss": m.get("win_loss")}
+                                         "class": m["class"], "win_loss": m.get("win_loss"),
+                                         "fen": moves_out[idx - 1]["fen"] if idx else result["start_fen"],
+                                         "uci": m["uci"], "best": m.get("best")}
                 break
     for color in ("white", "black"):
         col_moves = [m for m in moves_out if m["color"] == color]
@@ -378,7 +380,9 @@ def annotate(game: ParsedGame, evals: list[dict[str, Any]] | None,
             key=lambda m: -m["win_loss"],
         )
         result["critical_moments"] = [
-            {"ply": m["ply"], "san": m["san"], "color": m["color"], "win_loss": m["win_loss"], "class": m["class"]}
+            {"ply": m["ply"], "san": m["san"], "color": m["color"], "win_loss": m["win_loss"], "class": m["class"],
+             "uci": m["uci"], "best": m.get("best"), "best_san": m.get("best_san"),
+             "fen": moves_out[m["ply"] - 2]["fen"] if m["ply"] > 1 else result["start_fen"]}
             for m in swings[:5]
         ]
         # premature resignation: resigned while eval was still >= -1.5 for the player

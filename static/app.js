@@ -28,6 +28,36 @@
     return r.json();
   }
   function mount(html) { const c = $("#content"); c.innerHTML = html; return c; }
+  const describe = (fen, uci) => ChessBoard.describeMove(fen, uci);
+  const moveNo = ply => `${Math.ceil(ply / 2)}${ply % 2 ? "." : "…"}`;
+  /** A small board with arrows: red = what was played, green = the engine's move, blue = also acceptable. */
+  function miniBoard(ex, opts) {
+    opts = opts || {};
+    if (!ex || !ex.fen) return "";
+    const alts = (ex.alts || []).filter(u => u !== ex.best);
+    const played = ex.uci ? `<span class="you">You played</span> ${esc(describe(ex.fen, ex.uci))}.` : "";
+    const better = ex.best && ex.best !== ex.uci ? ` <span class="better">Better</span>: ${esc(describe(ex.fen, ex.best))}.` : "";
+    const also = alts.length ? ` <span class="alt">Also fine</span>: ${alts.map(u => esc(describe(ex.fen, u))).join("; ")}.` : "";
+    const meta = [ex.ply ? `move ${Math.ceil(ex.ply / 2)}` : "", ex.opponent ? `vs ${esc(ex.opponent)}` : "", ex.date ? dateOf(ex.date) : "", ex.win_loss != null ? `lost ${fmt(ex.win_loss, 0)}% win chance` : ""].filter(Boolean).join(" · ");
+    const link = ex.game_id ? ` <a data-game="${esc(ex.game_id)}" data-ply="${ex.ply || 0}">open in the game viewer ↗</a>` : "";
+    return `<div class="mini"><div class="mini-board" data-fen="${esc(ex.fen)}" data-uci="${esc(ex.uci || "")}" data-best="${esc(ex.best || "")}" data-alts="${esc(alts.join(","))}" data-side="${esc(ex.side || "white")}"></div>
+      <div class="cap">${opts.title ? `<b>${esc(opts.title)}</b><br>` : ""}${ex.caption ? esc(ex.caption) + " " : ""}${played}${better}${also}${opts.extra || ""}<span class="meta">${meta}${link}</span></div></div>`;
+  }
+  function hydrateMinis(root) {
+    (root || document).querySelectorAll(".mini-board[data-fen]").forEach(el => {
+      if (el.dataset.done) return;
+      el.dataset.done = "1";
+      const b = new ChessBoard.Board(el, { fen: el.dataset.fen, flipped: el.dataset.side === "black" });
+      const marks = {}, arrows = [];
+      const add = (u, color, mark) => { if (!u) return; arrows.push({ from: u.slice(0, 2), to: u.slice(2, 4), color }); if (mark) { marks[u.slice(0, 2)] = mark; marks[u.slice(2, 4)] = mark; } };
+      (el.dataset.alts || "").split(",").filter(Boolean).forEach(u => add(u, "var(--info)"));
+      add(el.dataset.best, "var(--good)");
+      add(el.dataset.uci, "var(--bad)", "last");
+      b.setPosition(el.dataset.fen, marks, arrows);
+    });
+    (root || document).querySelectorAll(".cap a[data-game]").forEach(a => { if (!a.dataset.done) { a.dataset.done = "1"; a.addEventListener("click", () => openGame(a.dataset.game, parseInt(a.dataset.ply, 10))); } });
+  }
+  const legend = () => `<div class="legend-boards"><span><span class="arrow" style="background:var(--bad)"></span>what you played</span><span><span class="arrow" style="background:var(--good)"></span>what the engine preferred</span><span><span class="arrow" style="background:var(--info)"></span>also acceptable</span><span>Boards are shown from your side of the table.</span></div>`;
   function attachChart(id, svg) { const host = document.getElementById(id); if (host) { host.innerHTML = ""; host.appendChild(svg); } }
 
   // ---------- theme ---------------------------------------------------------------------------
@@ -176,6 +206,7 @@
     const fn = { overview: renderOverview, insights: renderInsights, accuracy: renderAccuracy, openings: renderOpenings, tactics: renderTactics,
                  time: renderTime, endgames: renderEndgames, habits: renderHabits, games: renderGames, training: renderTraining }[state.tab];
     fn();
+    hydrateMinis($("#content"));
     window.scrollTo({ top: 0 });
   }
   const head = (title, text) => `<div class="section-head"><h2>${esc(title)}</h2>${text ? `<p>${esc(text)}</p>` : ""}</div>`;
@@ -231,13 +262,14 @@
   function insightCard(i) {
     return `<article class="insight ${esc(i.severity)}"><div class="sev"></div><div>
       <div class="cat"><span class="pill ${esc(i.severity)}">${esc(i.severity === "positive" ? "strength" : i.severity + " priority")}</span><span class="muted small">${esc(i.category)}</span></div>
-      <h3>${esc(i.title)}</h3><div class="detail">${esc(i.detail)}</div><div class="reco">${esc(i.recommendation)}</div></div></article>`;
+      <h3>${esc(i.title)}</h3><div class="detail">${esc(i.detail)}</div><div class="reco">${esc(i.recommendation)}</div>${i.example ? miniBoard(i.example, { title: "For example" }) : ""}</div></article>`;
   }
   function renderInsights() {
     const r = state.report;
     const plan = r.training_plan.map(p => `<div class="plan-item"><div><div class="eyebrow">${esc(p.category)}</div><h3>${esc(p.focus)}</h3><p class="muted">${esc(p.how)}</p><ul>${p.drills.map(d => `<li>${esc(d)}</li>`).join("")}</ul></div></div>`).join("");
     mount(`
-      ${head("Insights & plan", "Findings ranked by how many rating points they are likely costing you. Each needs a minimum sample before it is shown, so a short history produces fewer findings.")}
+      ${head("Insights & plan", "Findings ranked by how many rating points they are likely costing you. Each needs a minimum sample before it is shown, so a short history produces fewer findings. Where a finding has a concrete example from your games, the position is shown.")}
+      ${legend()}
       ${r.training_plan.length ? `<section class="panel"><h3>Your training plan</h3><div class="sub">One focus per category, in priority order.</div><div class="plan">${plan}</div></section>` : ""}
       <div style="display:grid;gap:.8rem">${r.insights.length ? r.insights.map(insightCard).join("") : `<section class="panel"><p class="muted">Not enough games yet for confident findings. Play more, or lower the engine depth and analyse more games.</p></section>`}</div>`);
   }
@@ -281,27 +313,48 @@
     return node.children.map(ch => {
       const leaf = !ch.children.length;
       const mvno = Math.ceil(ch.ply / 2) + (ch.ply % 2 ? ". " : "… ");
-      return `<details class="${leaf ? "leaf" : ""}" ${depth < 1 ? "open" : ""}><summary><span class="san">${mvno}${esc(ch.san)}</span><span class="n">${ch.games}</span>${Charts.wdlBar(ch.wins, ch.draws, ch.losses).outerHTML}<span class="score ${scoreClass(ch.score, 50)}">${pct(ch.score)}</span></summary>${leaf ? "" : treeHtml(ch, depth + 1)}</details>`;
+      return `<details class="${leaf ? "leaf" : ""}" ${depth < 1 ? "open" : ""}><summary data-fen="${esc(ch.fen || "")}" data-uci="${esc(ch.uci || "")}" data-fen-before="${esc(ch.fen_before || "")}" data-ply="${ch.ply}"><span class="san">${mvno}${esc(ch.san)}</span><span class="n">${ch.games}</span>${Charts.wdlBar(ch.wins, ch.draws, ch.losses).outerHTML}<span class="score ${scoreClass(ch.score, 50)}">${pct(ch.score)}</span></summary>${leaf ? "" : treeHtml(ch, depth + 1)}</details>`;
     }).join("");
   }
   function renderOpenings() {
     const r = state.report, op = r.openings, base = r.overview.all.score;
-    const mistakes = o => (o.typical_mistakes || []).map(m => `<div class="small"><span class="mono">${Math.ceil(m.ply / 2)}${m.ply % 2 ? "." : "…"} ${esc(m.san)}</span> <span class="cls ${m.class}">${m.class}</span> in ${m.games} game${m.games > 1 ? "s" : ""}${m.best_san ? `, better <span class="mono">${esc(m.best_san)}</span>` : ""}</div>`).join("") || '<span class="muted small">–</span>';
+    const mistakes = o => (o.typical_mistakes || []).map(m => `<div class="small">Move ${Math.ceil(m.ply / 2)}: ${esc(m.fen ? describe(m.fen, m.uci) : m.san)} <span class="cls ${m.class}">${m.class}</span>, ${m.games} game${m.games > 1 ? "s" : ""}</div>`).join("") || '<span class="muted small">–</span>';
+    const mistakeBoards = color => {
+      const rows = op[color].openings.filter(o => (o.typical_mistakes || []).length && o.typical_mistakes[0].fen).slice(0, 4);
+      if (!rows.length) return "";
+      return panel(`Your usual first slip as ${cap(color)}`, "The move where you most often first leave the engine's approval in your most played openings.", rows.map(o => miniBoard({ ...o.typical_mistakes[0], side: color, caption: `${o.name}: seen in ${o.typical_mistakes[0].games} game${o.typical_mistakes[0].games > 1 ? "s" : ""}.` }, { title: o.name })).join(""));
+    };
     const table = (rows, color) => `<div class="table-wrap"><table class="data"><thead><tr><th>Opening</th><th class="num">Games</th><th>W / D / L</th><th class="num">Score</th><th class="num">Accuracy</th><th class="num">Eval after move 10</th><th>Where you first go wrong</th></tr></thead><tbody>
       ${rows.map(o => `<tr class="clickable" data-open="${esc(o.example_ids[0] || "")}" title="Open the most recent game"><td>${esc(o.name)}${o.eco ? ` <span class="muted small">${esc(o.eco)}</span>` : ""}</td><td class="num">${o.games}</td><td>${wdl(o)}</td><td class="num ${scoreClass(o.score, base)}">${pct(o.score)}</td><td class="num">${fmt(o.accuracy)}</td><td class="num">${o.avg_eval_after_opening == null ? "–" : evalText(o.avg_eval_after_opening)}</td><td>${mistakes(o)}</td></tr>`).join("")}</tbody></table></div>`;
     const devs = color => {
       const d = op[color].deviations || [], lb = op[color].left_book_first || {};
       const intro = `<div class="sub">Against a compact book of ${"~200"} standard lines. You left the book first in ${lb.player || 0} games, your opponents in ${lb.opponent || 0}.</div>`;
       if (!d.length) return intro + '<span class="muted small">No departures recorded.</span>';
-      return intro + `<div class="table-wrap"><table class="data"><thead><tr><th>Your move</th><th>Book expects</th><th class="num">Games</th><th>W / D / L</th><th class="num">Score</th></tr></thead><tbody>${d.map(x => `<tr><td class="mono">${Math.ceil(x.ply / 2)}${x.ply % 2 ? "." : "…"} ${esc(x.san)}</td><td class="mono small">${x.book_moves.map(esc).join(" / ")}</td><td class="num">${x.games}</td><td>${wdl(x)}</td><td class="num ${scoreClass(x.score, base)}">${pct(x.score)}</td></tr>`).join("")}</tbody></table></div>`;
+      return intro + d.slice(0, 4).map(x => miniBoard({ fen: x.fen, uci: x.uci, best: (x.book_ucis || [])[0], alts: (x.book_ucis || []).slice(1), side: color, ply: x.ply,
+        caption: `${x.games} game${x.games > 1 ? "s" : ""}, ${pct(x.score)} score.` }, { title: `Move ${Math.ceil(x.ply / 2)}: you leave the book here` })).join("");
     };
     const side = color => `<div class="grid-32">
       ${panel(`As ${cap(color)}`, `${op[color].games} games, ${op[color].distinct_openings} distinct openings (chess.com's classification). Score is coloured against your overall ${pct(base)}. Eval is from your side after 10 moves.`, table(op[color].openings.slice(0, 15), color))}
-      <div class="stack">${panel(`${cap(color)} repertoire map`, "The first five moves of each game, with how often each branch occurs and how it scores. Click a line to expand.", `<div class="tree">${treeHtml(op[color].tree, 0) || '<span class="muted">No games.</span>'}</div>`)}
-      ${panel(`Where you leave theory as ${cap(color)}`, "", devs(color))}</div></div>`;
+      <div class="stack">${panel(`${cap(color)} repertoire map`, "The first five moves of each game, with how often each branch occurs and how it scores. Click a move to see the position.", `<div class="tree-with-board"><div class="tree" data-color="${color}">${treeHtml(op[color].tree, 0) || '<span class="muted">No games.</span>'}</div><div class="mini" id="tree-board-${color}"><div class="mini-board" data-fen="${esc(op[color].tree.fen || "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1")}" data-side="${color}"></div><div class="cap muted small">Starting position</div></div></div>`)}
+      ${panel(`Where you leave theory as ${cap(color)}`, "", devs(color))}</div></div>
+      ${mistakeBoards(color)}`;
     mount(`${head("Openings", "What you actually play, and what it does to your results. Look for lines with many games and a low score: that is where a few hours of study pay off fastest.")}
+      ${legend()}
       ${side("white")}${side("black")}`);
     document.querySelectorAll("tr[data-open]").forEach(tr => tr.addEventListener("click", () => tr.dataset.open && openGame(tr.dataset.open)));
+    mount.treeBoards = {};
+    document.querySelectorAll(".tree summary[data-fen]").forEach(sm => sm.addEventListener("click", e => {
+      const color = sm.closest(".tree").dataset.color;
+      const host = document.querySelector(`#tree-board-${color} .mini-board`);
+      const cap = document.querySelector(`#tree-board-${color} .cap`);
+      if (!host || !sm.dataset.fen) return;
+      let b = mount.treeBoards[color];
+      if (!b) { host.innerHTML = ""; delete host.dataset.done; b = mount.treeBoards[color] = new ChessBoard.Board(host, { fen: sm.dataset.fen, flipped: color === "black" }); }
+      const u = sm.dataset.uci;
+      b.setPosition(sm.dataset.fen, u ? { [u.slice(0, 2)]: "last", [u.slice(2, 4)]: "last" } : {}, []);
+      cap.innerHTML = `After ${moveNo(parseInt(sm.dataset.ply, 10))} <b>${esc(sm.querySelector(".san").textContent.replace(/^[\d.… ]+/, ""))}</b>: ${esc(describe(sm.dataset.fenBefore, u))}.`;
+      document.querySelectorAll(".tree summary.cur").forEach(x => x.classList.remove("cur")); sm.classList.add("cur");
+    }));
   }
 
   // ---------- tactics -------------------------------------------------------------------------
@@ -310,18 +363,18 @@
     if (!t.available) { mount(head("Tactics") + noEngine()); return; }
     const ex = Object.entries(t.examples).map(([tag, list]) => {
       const label = (t.tag_counts.find(x => x.tag === tag) || {}).label || tag;
-      return `<section class="panel"><h3>${esc(label)}</h3><ul class="critical">${list.map(e => `<li data-game="${esc(e.game_id)}" data-ply="${e.ply}"><span class="mono">${Math.ceil(e.ply / 2)}${e.ply % 2 ? "." : "…"} ${esc(e.san)}</span><span class="muted small">best ${esc(e.best_san || "?")} · −${fmt(e.win_loss, 0)}% · vs ${esc(e.opponent)} · ${dateOf(e.date)}</span></li>`).join("")}</ul></section>`;
+      return `<section class="panel"><h3>${esc(label)}</h3>${list.slice(0, 2).map(e => miniBoard(e)).join("")}</section>`;
     }).join("");
-    mount(`${head("Tactics", "Why your bad moves were bad. Every mistake and blunder in the analysed games was checked for what happened next: a hanging piece, a missed mate, a fork.")}
+    mount(`${head("Tactics", "Why your bad moves were bad. Every mistake and blunder in the analysed games was checked for what happened next: a hanging piece, a missed mate, a fork. Each cause below comes with positions from your games.")}
+      ${legend()}
       <div class="tiles">
         ${tile("Opponent blunders punished", pct(t.opponent_blunders.punish_pct), `${t.opponent_blunders.punished} of ${t.opponent_blunders.count} chances`, t.opponent_blunders.punish_pct != null && t.opponent_blunders.punish_pct < 60 ? "bad" : "good")}
         ${tile("Forced mates missed", t.mates_missed, "", t.mates_missed ? "warn" : "")}
         ${tile("Pieces hung", Object.values(t.pieces_hung).reduce((a, b) => a + b, 0), Object.entries(t.pieces_hung).map(([k, v]) => `${k}:${v}`).join(" "))}
       </div>
       ${panel("What went wrong", "Count of your mistakes and blunders by cause, across analysed games. One move can carry several causes.", `<div id="tag-chart"></div>`)}
-      <div class="grid-2">${ex}</div>`);
+      <div class="mini-grid">${ex}</div>`);
     attachChart("tag-chart", Charts.hbarChart({ data: t.tag_counts.map(x => ({ label: x.label, value: x.count, extra: `${x.count} · ${x.games_pct}% of games`, tip: `${x.label}: ${x.count} moves in ${x.games} games` })), labelWidth: 230, extraWidth: 150 }));
-    document.querySelectorAll("li[data-game]").forEach(li => li.addEventListener("click", () => openGame(li.dataset.game, parseInt(li.dataset.ply, 10))));
   }
 
   // ---------- time ----------------------------------------------------------------------------
@@ -457,7 +510,7 @@
       const cell = m => m ? `<span class="mv" data-ply="${m.ply}"><span><span class="cls ${m.class || ""}">${esc(m.san)}</span></span><span class="ev">${m.eval_text || ""}</span></span>` : "<span></span>";
       movesHtml.push(`<div class="row"><span class="no">${i / 2 + 1}.</span>${cell(w)}${cell(b)}</div>`);
     }
-    const crit = (an.critical_moments || []).map(c => `<li data-ply="${c.ply}"><span class="mono">${Math.ceil(c.ply / 2)}${c.ply % 2 ? "." : "…"} ${esc(c.san)}</span><span class="cls ${c.class}">${c.class}</span><span class="muted small">${c.color} lost ${fmt(c.win_loss, 0)}% win chance</span></li>`).join("");
+    const crit = (an.critical_moments || []).map(c => `<li data-ply="${c.ply}"><span class="cls ${c.class}">${c.class}</span><span>Move ${Math.ceil(c.ply / 2)}, ${c.color === g.player_color ? "you" : "opponent"}: ${esc(c.fen ? describe(c.fen, c.uci) : c.san)}${c.best && c.best !== c.uci && c.fen ? `; better was ${esc(describe(c.fen, c.best))}` : ""}</span><span class="muted small">−${fmt(c.win_loss, 0)}%</span></li>`).join("");
     $("#viewer-body").innerHTML = `
       <div class="game-meta"><span>${dateOf(g.end_time)}</span><span>${esc(g.time_class)} ${esc(g.time_control)}</span><span>${esc(g.opening_name || "")}${g.eco ? ` (${esc(g.eco)})` : ""}</span>
         <span><span class="pill ${g.player_result}">${g.player_result}</span> ${esc(g.termination)}</span>${g.url ? `<a href="${esc(g.url)}" target="_blank" rel="noopener">chess.com ↗</a>` : ""}</div>
@@ -470,6 +523,7 @@
           </div>
           <div id="eval-chart" style="margin-top:.6rem"></div>
           <div class="move-info" id="move-info"></div>
+          <div style="margin-top:.5rem">${legend()}</div>
         </div>
         <div>
           ${an.engine ? `<div class="tiles" style="margin-bottom:.8rem">${tile(`${cap(g.player_color)} (you)`, fmt(me.accuracy), `cp loss ${fmt(me.acpl, 0)} · ${me.classes.blunder} blunders, ${me.classes.mistake} mistakes`)}${tile("Opponent", fmt(opp.accuracy), `cp loss ${fmt(opp.acpl, 0)} · ${opp.classes.blunder} blunders, ${opp.classes.mistake} mistakes`)}</div>` : `<p class="muted">This game was not engine-analysed.</p>`}
@@ -519,14 +573,17 @@
     const cur = document.querySelector("#movelist .mv.cur"); if (cur) cur.scrollIntoView({ block: "nearest" });
     if (viewer.evalSvg) viewer.evalSvg.setMarker(p);
     const info = $("#move-info");
-    const nextNote = arrows.length ? `<div class="small" style="margin-top:.35rem"><span style="color:var(--good)">▶</span> Next: ${Math.ceil(next.ply / 2)}${next.ply % 2 ? "." : "…"} <span class="cls ${next.class}">${esc(next.san)}</span> was played here (${next.class}); the engine preferred <strong class="mono">${esc(next.best_san || next.best)}</strong>.</div>` : "";
+    const prevFen = p > 1 ? an.moves[p - 2].fen : an.start_fen;
+    const mine = c => c === viewer.data.game.player_color;
+    const nextNote = arrows.length ? `<div class="small" style="margin-top:.35rem"><span style="color:var(--good)">▶</span> The arrows show the next move (move ${Math.ceil(next.ply / 2)}, ${mine(next.color) ? "you" : "opponent"}): <span style="color:var(--bad);font-weight:600">${esc(describe(fen, next.uci))}</span> was played (${next.class}); <span style="color:var(--good);font-weight:600">${esc(describe(fen, next.best))}</span> was better.</div>` : "";
     if (!m) { info.innerHTML = `<div class="headline">Starting position</div><div class="muted small">Step through the game with the arrow keys or click a move.</div>${nextNote}`; return; }
+    const said = `<div>${mine(m.color) ? "You" : "Opponent"}: ${esc(describe(prevFen, m.uci))}.</div>`;
     const tags = (m.tags || []).filter(t => !["opening", "middlegame", "endgame"].includes(t)).map(t => `<span class="tag">${esc(TAGS[t] || t)}</span>`).join("");
     const clock = m.clock != null ? ` · clock ${secs(m.clock)}${m.time_spent != null ? ` (spent ${secs(m.time_spent)})` : ""}` : "";
-    if (!m.class) { info.innerHTML = `<div class="headline">${Math.ceil(m.ply / 2)}${m.ply % 2 ? "." : "…"} ${esc(m.san)}</div><div class="muted small">${cap(m.phase)}${clock}</div>${nextNote}`; return; }
-    const better = m.best && m.best !== m.uci && m.class !== "best" ? `<div>Better was <strong class="mono">${esc(m.best_san || m.best)}</strong>${m.pv && m.pv.length ? ` <span class="muted small">(${esc(m.pv.join(" "))})</span>` : ""}</div>` : (m.class === "best" ? `<div class="muted small">Engine's first choice.</div>` : "");
-    info.innerHTML = `<div class="headline"><span>${Math.ceil(m.ply / 2)}${m.ply % 2 ? "." : "…"} ${esc(m.san)}</span><span class="cls ${m.class}">${m.class}</span><span class="muted small">${m.eval_text} · win chance ${fmt(m.win_before, 0)}% → ${fmt(m.win_after, 0)}%${m.cp_loss ? ` · lost ${m.cp_loss} cp` : ""}</span></div>
-      ${better}<div class="muted small">${cap(m.phase)}${clock}</div><div style="margin-top:.3rem">${tags}</div>${nextNote}`;
+    if (!m.class) { info.innerHTML = `<div class="headline">${moveNo(m.ply)} ${esc(m.san)}</div>${said}<div class="muted small">${cap(m.phase)}${clock}</div>${nextNote}`; return; }
+    const better = m.best && m.best !== m.uci && m.class !== "best" ? `<div><span style="color:var(--good);font-weight:600">Better</span>: ${esc(describe(prevFen, m.best))}${m.pv && m.pv.length ? ` <span class="muted small">(${esc(m.pv.join(" "))})</span>` : ""}</div>` : (m.class === "best" ? `<div class="muted small">Engine's first choice.</div>` : "");
+    info.innerHTML = `<div class="headline"><span>${moveNo(m.ply)} ${esc(m.san)}</span><span class="cls ${m.class}">${m.class}</span><span class="muted small">${m.eval_text} · win chance ${fmt(m.win_before, 0)}% → ${fmt(m.win_after, 0)}%${m.cp_loss ? ` · lost ${m.cp_loss} cp` : ""}</span></div>
+      ${said}${better}<div class="muted small">${cap(m.phase)}${clock}</div><div style="margin-top:.3rem">${tags}</div>${nextNote}`;
   }
   const TAGS = { missed_mate: "Missed a forced mate", allowed_mate: "Allowed a forced mate", hung_piece: "Hung a piece", lost_material: "Lost material", missed_material: "Missed a material win", bad_trade: "Bad trade", walked_into_fork: "Walked into a fork", threw_away_win: "Threw away a winning position", collapsed: "Went from equal to lost", time_trouble: "Time trouble", rushed: "Rushed (under 2s)", missed_opponent_blunder: "Missed the opponent's blunder" };
 
@@ -561,6 +618,7 @@
     const unseen = list.filter(p => !srs[SRS.id(p)]).length;
     mount(`${head("Training", "Positions from your own games where you went wrong. Find the move the engine preferred: click the piece, then the destination square. Positions you fail come back sooner; positions you solve return after 1, 3, 7, 14 and 30 days.")}
       <div class="tiles" style="margin-bottom:.8rem">${tile("Due for review", due, "solved before, time to repeat")}${tile("New", unseen, "never attempted")}${tile("Verified", ps.filter(p => p.verified).length, "checked with three engine lines")}</div>
+      ${legend()}<div style="height:.8rem"></div>
       <div class="theme-chips">${themes.map(t => `<button class="btn small ${T.theme === t ? "on" : ""}" data-theme="${esc(t)}">${esc(t === "all" ? `All (${ps.length})` : `${TAGS[t] || t} (${ps.filter(p => p.theme === t).length})`)}</button>`).join("")}</div>
       <div class="puzzle-layout">
         <div><div id="pboard"></div>
@@ -580,7 +638,8 @@
       board.setPosition(p.fen, {}, []);
       $("#p-count").textContent = `${T.index + 1} / ${list.length}`;
       const alts = (p.accepted_san || []).length > 1 ? ` <span class="pill">${p.accepted_san.length} answers accepted</span>` : (p.only_move ? ' <span class="pill">only move</span>' : "");
-      $("#p-prompt").innerHTML = `<div class="eyebrow">${esc(p.theme_label)}</div><h3>${cap(p.side)} to move${alts}</h3><p class="muted small">vs ${esc(p.opponent)} · ${dateOf(p.date)} · move ${Math.ceil(p.ply / 2)}. In the game you played <strong class="mono">${esc(p.played)}</strong> and lost ${fmt(p.win_loss, 0)}% win chance.${hist ? ` Attempted ${hist.seen}×, ${hist.fails} fail${hist.fails === 1 ? "" : "s"}.` : ""}</p>`;
+      const playedUci = (p.played_uci || "");
+      $("#p-prompt").innerHTML = `<div class="eyebrow">${esc(p.theme_label)}</div><h3>${cap(p.side)} to move${alts}</h3><p class="muted small">vs ${esc(p.opponent)} · ${dateOf(p.date)} · move ${Math.ceil(p.ply / 2)}. In the game you played ${playedUci ? esc(describe(p.fen, playedUci)) : `<strong class="mono">${esc(p.played)}</strong>`} and lost ${fmt(p.win_loss, 0)}% win chance. Find the better move: click the piece, then the square.${hist ? ` Attempted ${hist.seen}×, ${hist.fails} fail${hist.fails === 1 ? "" : "s"}.` : ""}</p>`;
       $("#p-status").textContent = "";
       $("#p-detail").textContent = "";
     };
@@ -589,7 +648,8 @@
       const marks = {}, arrows = [];
       (p.accepted || [p.best]).forEach((u, i) => { marks[u.slice(0, 2)] = "ok"; marks[u.slice(2, 4)] = "ok"; arrows.push({ from: u.slice(0, 2), to: u.slice(2, 4), color: i ? "var(--info)" : "var(--good)" }); });
       board.setPosition(p.fen, marks, arrows);
-      $("#p-detail").textContent = `Best: ${p.best_san}${(p.accepted_san || []).length > 1 ? ` (also fine: ${p.accepted_san.slice(1).join(", ")})` : ""}. Line: ${p.pv.join(" ")}.`;
+      const others = (p.accepted || []).slice(1).map(u => describe(p.fen, u));
+      $("#p-detail").innerHTML = `<span style="color:var(--good);font-weight:600">Best</span>: ${esc(describe(p.fen, p.best))} (${esc(p.best_san)}).${others.length ? ` <span style="color:var(--info);font-weight:600">Also fine</span>: ${esc(others.join("; "))}.` : ""} <span class="muted">Engine line: ${esc(p.pv.join(" "))}.</span>`;
     };
     let wrongTries = 0;
     board.onSquare = sq => {

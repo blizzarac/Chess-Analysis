@@ -106,5 +106,26 @@
     }
   }
 
-  window.ChessBoard = { Board, parseFen };
+  const NAMES = { k: "king", q: "queen", r: "rook", b: "bishop", n: "knight", p: "pawn" };
+  /** "knight from f6 to d5", "bishop takes the knight on e5", "castles kingside", "pawn from e7 to e8, promoting to a queen" */
+  function describeMove(fen, uci) {
+    if (!fen || !uci || uci.length < 4) return uci || "";
+    const pieces = parseFen(fen);
+    const from = uci.slice(0, 2), to = uci.slice(2, 4);
+    const p = pieces[from];
+    if (!p) return `${from} to ${to}`;
+    const name = NAMES[p.type];
+    if (p.type === "k" && Math.abs(FILES.indexOf(from[0]) - FILES.indexOf(to[0])) === 2) {
+      return to[0] === "g" ? "castles kingside" : "castles queenside";
+    }
+    const victim = pieces[to];
+    let text;
+    if (victim) text = `${name} takes the ${NAMES[victim.type]} on ${to}`;
+    else if (p.type === "p" && from[0] !== to[0]) text = `pawn takes en passant on ${to}`;
+    else text = `${name} from ${from} to ${to}`;
+    if (uci.length === 5) text += `, promoting to a ${NAMES[uci[4].toLowerCase()] || "queen"}`;
+    return text;
+  }
+
+  window.ChessBoard = { Board, parseFen, describeMove };
 })();

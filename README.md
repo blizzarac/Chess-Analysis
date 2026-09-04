@@ -27,6 +27,9 @@ It answers the questions a coach would ask after looking at your games:
   blunders, conversion, ratings).
 - **Game viewer:** board, evaluation bar and graph, move list with classifications, the better move
   drawn as an arrow, critical moments.
+- **No notation needed:** every finding that mentions a move comes with a small board (red arrow
+  for what you played, green for the engine's move, blue for other acceptable moves) and a plain
+  description such as "knight from f6 to d5" or "bishop takes the knight on e5".
 
 ## Requirements
 

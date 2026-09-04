@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import statistics
 import time
+
+import chess
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from typing import Any, Iterable
@@ -212,6 +214,16 @@ def accuracy_section(analyzed: list[tuple[ParsedGame, dict]]) -> dict[str, Any]:
         }
 
     by_phase = {}
+    phase_examples: dict[str, dict[str, Any]] = {}
+    for g, ann in analyzed:
+        moves = ann["moves"]
+        for i, m in enumerate(moves):
+            if m["color"] == g.player_color and m.get("class") == "blunder" and m["phase"] not in phase_examples:
+                phase_examples[m["phase"]] = {"game_id": g.id, "ply": m["ply"], "san": m["san"], "uci": m["uci"],
+                                              "best": m.get("best"), "best_san": m.get("best_san"),
+                                              "fen": moves[i - 1]["fen"] if i else ann.get("start_fen"),
+                                              "side": g.player_color, "win_loss": m.get("win_loss"),
+                                              "opponent": g.opponent, "date": g.end_time}
     for ph in PHASES:
         vals = [me[f"acpl_{ph}"] for _, me in per_game if me.get(f"acpl_{ph}") is not None]
         moves = sum(me.get(f"moves_{ph}", 0) for _, me in per_game)
@@ -280,6 +292,7 @@ def accuracy_section(analyzed: list[tuple[ParsedGame, dict]]) -> dict[str, Any]:
                           for tc in sorted({g.time_class for g, _ in per_game})},
         "by_result": {r: group([(g, me) for g, me in per_game if g.player_result == r]) for r in ("win", "draw", "loss")},
         "by_phase": by_phase,
+        "phase_examples": phase_examples,
         "class_counts": dict(class_counts),
         "total_moves": total_moves,
         "by_move_number": by_move_number,
@@ -297,7 +310,8 @@ def _tree_insert(root: dict[str, Any], game: ParsedGame, ann: dict | None, max_p
     for mv in game.moves[:max_plies]:
         child = node["children"].get(mv.san)
         if child is None:
-            child = {"san": mv.san, "games": 0, "wins": 0, "draws": 0, "losses": 0, "children": {}, "ply": mv.ply}
+            child = {"san": mv.san, "games": 0, "wins": 0, "draws": 0, "losses": 0, "children": {}, "ply": mv.ply,
+                     "fen": mv.fen_after, "uci": mv.uci, "fen_before": mv.fen_before}
             node["children"][mv.san] = child
         child["games"] += 1
         child[{"win": "wins", "draw": "draws", "loss": "losses"}[game.player_result]] += 1
@@ -315,6 +329,9 @@ def _tree_finalize(node: dict[str, Any], min_games: int) -> dict[str, Any]:
         "draws": node.get("draws", 0),
         "losses": node.get("losses", 0),
         "score": _score(node.get("wins", 0), node.get("draws", 0), node.get("losses", 0)),
+        "fen": node.get("fen"),
+        "fen_before": node.get("fen_before"),
+        "uci": node.get("uci"),
         "children": [_tree_finalize(k, min_games) for k in kids[:8]],
     }
 
@@ -368,7 +385,8 @@ def openings_section(games: list[ParsedGame], analyzed_by_id: dict[str, dict], a
             e["left_book_first"] = {"player": left["player"], "opponent": left["opponent"]}
             e["typical_mistakes"] = [
                 {"ply": k[0], "san": k[1], "games": n, "best_san": first_error_detail[k].get("best_san"),
-                 "class": first_error_detail[k].get("class")}
+                 "class": first_error_detail[k].get("class"), "fen": first_error_detail[k].get("fen"),
+                 "uci": first_error_detail[k].get("uci"), "best": first_error_detail[k].get("best")}
                 for k, n in first_errors.most_common(3) if n >= 2 or len(gs) < 4
             ]
             return e
@@ -384,6 +402,7 @@ def openings_section(games: list[ParsedGame], analyzed_by_id: dict[str, dict], a
         # the player's most common departures from the book, with how those games went
         dev: dict[tuple[int, str], list[ParsedGame]] = defaultdict(list)
         dev_book: dict[tuple[int, str], list[str]] = {}
+        dev_pos: dict[tuple[int, str], dict[str, Any]] = {}
         left_first = Counter()
         for g in col_games:
             bk = (all_annotations.get(g.id) or {}).get("book") or {}
@@ -393,8 +412,18 @@ def openings_section(games: list[ParsedGame], analyzed_by_id: dict[str, dict], a
                     key = (bk["deviation_ply"], bk["played"])
                     dev[key].append(g)
                     dev_book[key] = bk["book_moves"]
+                    if key not in dev_pos:
+                        mv = g.moves[bk["deviation_ply"] - 1]
+                        board = chess.Board(mv.fen_before)
+                        ucis = []
+                        for san in bk["book_moves"][:4]:
+                            try:
+                                ucis.append(board.parse_san(san).uci())
+                            except ValueError:
+                                pass
+                        dev_pos[key] = {"fen": mv.fen_before, "uci": mv.uci, "book_ucis": ucis}
         deviations = sorted(
-            ({"ply": k[0], "san": k[1], "book_moves": dev_book[k][:4], **_wdl(v)} for k, v in dev.items()),
+            ({"ply": k[0], "san": k[1], "book_moves": dev_book[k][:4], **dev_pos[k], **_wdl(v)} for k, v in dev.items()),
             key=lambda d: -d["games"],
         )
         out[color] = {
@@ -522,7 +551,9 @@ def tactics_section(analyzed: list[tuple[ParsedGame, dict]]) -> dict[str, Any]:
                 if len(examples[t]) < 4:
                     examples[t].append({"game_id": g.id, "ply": m["ply"], "san": m["san"], "best_san": m.get("best_san"),
                                         "win_loss": m.get("win_loss"), "opponent": g.opponent, "date": g.end_time,
-                                        "fen_before": moves[i - 1]["fen"] if i else None})
+                                        "fen": moves[i - 1]["fen"] if i else ann.get("start_fen"),
+                                        "uci": m["uci"], "best": m.get("best"), "side": g.player_color,
+                                        "class": m.get("class")})
                 if t == "hung_piece":
                     # which piece got lost? look at the opponent's capture
                     nxt = moves[i + 1] if i + 1 < len(moves) else None
@@ -623,6 +654,7 @@ def puzzle_candidates(g: ParsedGame, ann: dict[str, Any]) -> list[dict[str, Any]
             "fen": fen_before,
             "side": g.player_color,
             "played": m["san"],
+            "played_uci": m["uci"],
             "best": m["best"],
             "best_san": m.get("best_san"),
             "pv": m.get("pv", []),

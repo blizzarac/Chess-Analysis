@@ -249,6 +249,27 @@ table.data tr.clickable:hover td { background: var(--surface-2); }
 .delta.up { color: var(--good); } .delta.down { color: var(--bad); } .delta.flat { color: var(--ink-3); font-weight: 400; }
 .stack { display: flex; flex-direction: column; gap: 1.25rem; min-width: 0; }
 
+/* mini boards and legends */
+.mini { display: grid; grid-template-columns: 170px minmax(0, 1fr); gap: 0.8rem; align-items: start; margin-top: 0.6rem; }
+.mini .mini-board .board { width: 170px; border-width: 1px; }
+.mini .sq { font-size: 17px; }
+.mini .coord { font-size: 6px; }
+.mini .cap { font-size: 0.85rem; color: var(--ink-2); }
+.mini .cap b { color: var(--ink); }
+.mini .cap .you { color: var(--bad); font-weight: 600; }
+.mini .cap .better { color: var(--good); font-weight: 600; }
+.mini .cap .alt { color: var(--info); font-weight: 600; }
+.mini .cap .meta { display: block; color: var(--ink-3); font-size: 0.78rem; margin-top: 0.3rem; }
+.mini .cap a { cursor: pointer; }
+.mini-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); gap: 1rem; }
+.legend-boards { display: flex; flex-wrap: wrap; gap: 0.4rem 1.2rem; font-size: 0.82rem; color: var(--ink-2); padding: 0.55rem 0.8rem; background: var(--surface-2); border: 1px solid var(--line); border-radius: 8px; }
+.legend-boards .arrow { display: inline-block; width: 22px; height: 4px; border-radius: 2px; vertical-align: middle; margin-right: 0.35rem; }
+.tree-with-board { display: grid; grid-template-columns: minmax(0, 1fr) 190px; gap: 1rem; align-items: start; }
+.tree-with-board .mini { grid-template-columns: 1fr; margin-top: 0; }
+.tree-with-board .mini .mini-board .board { width: 190px; }
+.tree summary.cur { background: var(--accent-soft); }
+@media (max-width: 700px) { .mini { grid-template-columns: 1fr; } .tree-with-board { grid-template-columns: 1fr; } }
+
 /* insights */
 .insight { display: grid; grid-template-columns: auto 1fr; gap: 0.9rem; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 1rem 1.2rem; }
 .insight .sev { width: 6px; border-radius: 3px; background: var(--line-strong); }

@@ -16,8 +16,17 @@ def _ins(id_: str, category: str, severity: str, title: str, detail: str, recomm
             "recommendation": recommendation, "impact": round(impact, 2), "evidence": evidence or {}}
 
 
+def _example(r: dict[str, Any], *tags: str) -> dict[str, Any] | None:
+    ex = (r.get("tactics") or {}).get("examples") or {}
+    for t in tags:
+        if ex.get(t):
+            return ex[t][0]
+    return None
+
+
 def build_insights(r: dict[str, Any]) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
+    _attach_examples_after = True
     ov, res, acc, op, tm, tac, eg = (r["overview"], r["results"], r["accuracy"], r["openings"], r["time"],
                                      r["tactics"], r["endgames"])
     total = ov["games_total"]
@@ -355,6 +364,38 @@ def build_insights(r: dict[str, Any]) -> list[dict[str, Any]]:
                 "Against lower-rated players play your normal, solid chess. Let them make the mistakes; they will.",
                 impact=3 + (62 - w) / 5, evidence=lower,
             ))
+    # a board to look at, wherever one exists
+    for ins in out:
+        ex = None
+        cat, iid = ins["category"], ins["id"]
+        if iid == "hanging_pieces":
+            ex = _example(r, "hung_piece", "lost_material")
+        elif iid == "missed_tactics":
+            ex = _example(r, "missed_mate", "missed_material")
+        elif iid == "forks":
+            ex = _example(r, "walked_into_fork")
+        elif iid == "punish":
+            ex = _example(r, "missed_opponent_blunder")
+        elif iid in ("conversion", "endgame_conversion"):
+            ex = _example(r, "threw_away_win")
+        elif iid == "time_trouble_errors":
+            ex = _example(r, "time_trouble")
+        elif iid == "fast_moves":
+            ex = _example(r, "rushed")
+        elif iid == "blunders_in_losses":
+            ex = _example(r, "hung_piece", "allowed_mate", "collapsed")
+        elif iid.startswith("phase_"):
+            ex = ((r.get("accuracy") or {}).get("phase_examples") or {}).get(iid[len("phase_"):])
+        elif iid.startswith("opening_") and ins["evidence"].get("opening"):
+            tm = ins["evidence"]["opening"].get("typical_mistakes") or []
+            if tm and tm[0].get("fen"):
+                m = tm[0]
+                ex = {"fen": m["fen"], "uci": m["uci"], "best": m["best"], "san": m["san"], "best_san": m["best_san"],
+                      "side": ins["evidence"].get("color"), "ply": m["ply"], "game_id": None,
+                      "caption": f"Your usual first slip in this line, seen in {m['games']} game(s)"}
+        if ex:
+            ins["example"] = {k: ex.get(k) for k in ("fen", "uci", "best", "san", "best_san", "side", "ply", "game_id",
+                                                     "opponent", "date", "win_loss", "caption")}
     out.sort(key=lambda i: (-(i["severity"] != "positive"), -i["impact"]))
     return out
 
