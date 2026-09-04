@@ -244,6 +244,11 @@ table.data tr.clickable:hover td { background: var(--surface-2); }
 .legend span::before { content: ""; display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 0.35rem; background: var(--swatch); vertical-align: -1px; }
 .chart-tip { position: fixed; pointer-events: none; background: var(--ink); color: var(--bg); padding: 0.35rem 0.55rem; border-radius: 6px; font-size: 0.78rem; z-index: 50; white-space: nowrap; }
 
+.deltas { display: flex; flex-wrap: wrap; gap: 0.5rem 1.5rem; }
+.delta { font-weight: 600; font-size: 0.85rem; }
+.delta.up { color: var(--good); } .delta.down { color: var(--bad); } .delta.flat { color: var(--ink-3); font-weight: 400; }
+.stack { display: flex; flex-direction: column; gap: 1.25rem; min-width: 0; }
+
 /* insights */
 .insight { display: grid; grid-template-columns: auto 1fr; gap: 0.9rem; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 1rem 1.2rem; }
 .insight .sev { width: 6px; border-radius: 3px; background: var(--line-strong); }

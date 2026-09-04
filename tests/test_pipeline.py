@@ -40,7 +40,11 @@ def test_pipeline_without_engine(db):
     assert rep["accuracy"]["available"] is False
     assert rep["time"]["available"] is True          # clocks work without an engine
     assert rep["openings"]["white"]["openings"]
-    assert rep["games"][0]["analyzed"] is False
+    games, total = db.list_game_summaries("testplayer", limit=5)
+    assert total == 70 and games[0]["analyzed"] is False
+    wins, n_wins = db.list_game_summaries("testplayer", result="win", color="white", limit=200)
+    assert n_wins == len(wins) and all(g["result"] == "win" and g["color"] == "white" for g in wins)
+    assert db.history("testplayer")[0]["games_total"] == 70
     # cached months are skipped on the second run
     job2 = run_job(db, pool, {"max_engine_games": 0, "depth": 8})
     assert job2.status == "done"
@@ -85,8 +89,12 @@ def test_api_end_to_end(db):
         assert j["status"] == "done", j
         rep = client.get("/api/report/testplayer").json()
         assert rep["player"]["username"] == "testplayer"
-        gid = rep["games"][0]["id"]
+        listing = client.get("/api/players/testplayer/games?limit=3&analyzed=true").json()
+        assert listing["total"] == 2 and len(listing["games"]) == 2
+        gid = listing["games"][0]["id"]
         detail = client.get(f"/api/games/testplayer/{gid}").json()
+        assert client.get("/api/players/testplayer/history").json()[0]["games_analyzed"] == 2
+        assert rep["previous"] is None or "games_total" in rep["previous"]
         assert detail["analysis"]["moves"]
         assert detail["game"]["opponent"]
         assert client.get("/api/report/nobody").status_code == 404

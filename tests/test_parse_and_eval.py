@@ -98,3 +98,38 @@ def test_annotate_with_fake_evals():
     assert "collapsed" in mv["tags"]
     assert ann["white"]["classes"]["blunder"] >= 1
     assert len(ann["eval_curve"]) == n + 1
+
+
+def test_start_time_and_book_and_phases():
+    from chess_analysis.pgn_parse import start_timestamp
+    from chess_analysis.analysis.game_analysis import annotate
+    g = parse_game(load_games()[0], "testplayer")
+    assert g.start_time is not None and g.start_time <= g.end_time
+    assert start_timestamp({"UTCDate": "2026.01.03", "StartTime": "23:50:00"}, 1767486000) == 1767484200
+    assert start_timestamp({}, 5) is None
+    ann = annotate(g, None)
+    assert ann["book"]["name"] and ann["start_fen"].startswith("rnbqkbnr")
+    ms = ann["phases"]["middlegame_start_ply"]
+    assert ms is None or 12 < ms <= 31
+    assert all("premove" in m for m in ann["moves"])
+
+
+def test_multipv_alternatives_flow_into_puzzles():
+    from chess_analysis.analysis.game_analysis import annotate
+    from chess_analysis.analysis.report import puzzle_candidates
+    g = parse_game(load_games()[0], "testplayer")
+    n = len(g.moves)
+    evals = [{"cp": 0, "mate": None, "best": None, "pv": []} for _ in range(n + 1)]
+    mv = g.moves[2]
+    other = "h2h3" if mv.uci != "h2h3" else "h2h4"
+    evals[2].update({"best": other, "pv": [other]})
+    evals[3]["cp"] = -400
+    # MultiPV says both `other` and a second move are fine, and the played move is not
+    multipv = {"3": [{"uci": other, "cp": 0, "mate": None, "pv": [other]},
+                     {"uci": "a2a4" if mv.uci != "a2a4" else "b2b3", "cp": -20, "mate": None, "pv": []},
+                     {"uci": mv.uci, "cp": -400, "mate": None, "pv": []}]}
+    ann = annotate(g, evals, multipv)
+    m = ann["moves"][2]
+    assert len(m["alternatives"]) == 2 and m["played_is_fine"] is False
+    cands = puzzle_candidates(g, ann)
+    assert cands and cands[0]["verified"] and len(cands[0]["accepted"]) == 2

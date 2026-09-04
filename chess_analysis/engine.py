@@ -108,3 +108,22 @@ class EnginePool:
                 break
             out.append(evaluate(board))
         return out
+
+    def analyze_multipv(self, fen: str, depth: int = 14, multipv: int = 3, chess960: bool = False) -> list[dict[str, Any]]:
+        """Top `multipv` moves for one position, each with a white-POV score. Runs in the calling thread."""
+        eng = self._engine()
+        board = chess.Board(fen, chess960=chess960)
+        if board.is_game_over():
+            return []
+        infos = eng.analyse(board, chess.engine.Limit(depth=depth), multipv=multipv)
+        out: list[dict[str, Any]] = []
+        for info in infos:
+            pv = [m.uci() for m in info.get("pv", [])]
+            score = info.get("score")
+            if not pv or score is None:
+                continue
+            white_score = score.white()
+            mate = white_score.mate()
+            cp = (MATE_CP - abs(mate) if mate > 0 else -MATE_CP + abs(mate)) if mate is not None else (white_score.score() or 0)
+            out.append({"uci": pv[0], "cp": int(cp), "mate": mate, "pv": pv[:6]})
+        return out

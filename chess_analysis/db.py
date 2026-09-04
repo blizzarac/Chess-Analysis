@@ -35,6 +35,12 @@ CREATE TABLE IF NOT EXISTS games (
     PRIMARY KEY (id, username)
 );
 CREATE INDEX IF NOT EXISTS games_user_time ON games (username, end_time DESC);
+CREATE TABLE IF NOT EXISTS report_history (
+    username    TEXT NOT NULL,
+    created_at  REAL NOT NULL,
+    summary_json TEXT NOT NULL,
+    PRIMARY KEY (username, created_at)
+);
 CREATE TABLE IF NOT EXISTS reports (
     username    TEXT NOT NULL,
     options_key TEXT NOT NULL,
@@ -56,6 +62,10 @@ class Database:
         self._conn.execute("PRAGMA synchronous=NORMAL")
         with self._lock:
             self._conn.executescript(SCHEMA)
+            cols = {r["name"] for r in self._conn.execute("PRAGMA table_info(games)")}
+            if "summary_json" not in cols:
+                self._conn.execute("ALTER TABLE games ADD COLUMN summary_json TEXT")
+                self._conn.commit()
 
     def close(self) -> None:
         with self._lock:
@@ -179,6 +189,62 @@ class Database:
                 (json.dumps(analysis), depth, username, game_id),
             )
             self._conn.commit()
+
+    def save_game_summaries(self, username: str, summaries: dict[str, dict[str, Any]]) -> None:
+        with self._lock:
+            self._conn.executemany(
+                "UPDATE games SET summary_json=? WHERE username=? AND id=?",
+                [(json.dumps(v), username, k) for k, v in summaries.items()],
+            )
+            self._conn.commit()
+
+    def list_game_summaries(
+        self, username: str, offset: int = 0, limit: int = 50, time_class: str | None = None,
+        result: str | None = None, color: str | None = None, analyzed: bool | None = None,
+        query: str | None = None,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """Filtered, paginated game summaries (as stored by the report builder)."""
+        where = ["username=?", "summary_json IS NOT NULL"]
+        params: list[Any] = [username]
+        if time_class:
+            where.append("time_class=?")
+            params.append(time_class)
+        if result:
+            where.append("json_extract(summary_json, '$.result')=?")
+            params.append(result)
+        if color:
+            where.append("json_extract(summary_json, '$.color')=?")
+            params.append(color)
+        if analyzed:
+            where.append("json_extract(summary_json, '$.analyzed')=1")
+        if query:
+            where.append("(lower(json_extract(summary_json, '$.opponent')) LIKE ? OR lower(json_extract(summary_json, '$.opening')) LIKE ?)")
+            like = f"%{query.lower()}%"
+            params.extend([like, like])
+        sql_where = " AND ".join(where)
+        with self._lock:
+            total = self._conn.execute(f"SELECT COUNT(*) FROM games WHERE {sql_where}", params).fetchone()[0]
+            rows = self._conn.execute(
+                f"SELECT summary_json FROM games WHERE {sql_where} ORDER BY end_time DESC LIMIT ? OFFSET ?",
+                [*params, limit, offset],
+            ).fetchall()
+        return [json.loads(r["summary_json"]) for r in rows], int(total)
+
+    def add_history(self, username: str, summary: dict[str, Any]) -> None:
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO report_history (username, created_at, summary_json) VALUES (?,?,?)",
+                (username, time.time(), json.dumps(summary)),
+            )
+            self._conn.commit()
+
+    def history(self, username: str, limit: int = 20) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT created_at, summary_json FROM report_history WHERE username=? ORDER BY created_at DESC LIMIT ?",
+                (username, limit),
+            ).fetchall()
+        return [{"created_at": r["created_at"], **json.loads(r["summary_json"])} for r in rows]
 
     def count_games(self, username: str) -> tuple[int, int]:
         with self._lock:

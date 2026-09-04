@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .analysis.game_analysis import annotate
-from .analysis.report import build_report
+from .analysis.report import build_report, puzzle_candidates, report_summary
 from .chesscom import ChessComClient, ChessComError, normalize_username
 from .config import settings
 from .db import Database
@@ -101,6 +101,7 @@ class JobManager:
             await self._fetch(job)
             games = self._load_games(job)
             await self._analyze(job, games)
+            await self._verify_puzzles(job, games)
             self._report(job, games)
             job.status = "done"
         except ChessComError as exc:
@@ -219,6 +220,49 @@ class JobManager:
         if job.cancel_requested:
             raise asyncio.CancelledError
 
+    async def _verify_puzzles(self, job: Job, games: list[ParsedGame]) -> None:
+        """Second engine pass: MultiPV on the positions that will become puzzles, so that
+        alternative solutions are accepted and false positives from single-PV analysis are dropped."""
+        if not self.pool.available:
+            return
+        depth = int(job.options["depth"])
+        todo: list[tuple[ParsedGame, int, str]] = []
+        for g in games:
+            raw = g.headers.get("_raw_analysis")
+            if not isinstance(raw, dict) or not raw.get("evals"):
+                continue
+            have = raw.get("multipv") or {}
+            try:
+                ann = annotate(g, raw["evals"])
+            except Exception:  # noqa: BLE001
+                continue
+            for cand in puzzle_candidates(g, ann):
+                if str(cand["ply"]) not in have:
+                    todo.append((g, cand["ply"], cand["fen"]))
+        if not todo:
+            return
+        job.status = "analyzing"
+        job.progress.update({"verify_total": len(todo), "verify_done": 0})
+        loop = asyncio.get_running_loop()
+        sem = asyncio.Semaphore(self.pool.workers)
+
+        async def run_one(g: ParsedGame, ply: int, fen: str) -> None:
+            async with sem:
+                if job.cancel_requested:
+                    return
+                alts = await loop.run_in_executor(self.pool.executor(), self.pool.analyze_multipv, fen, depth, 3,
+                                                  g.rules == "chess960")
+                raw = g.headers["_raw_analysis"]  # type: ignore[index]
+                raw.setdefault("multipv", {})[str(ply)] = alts  # type: ignore[union-attr]
+                self.db.save_analysis(job.username, g.id, raw, int(g.headers.get("_raw_depth") or depth))  # type: ignore[arg-type]
+                job.progress["verify_done"] += 1
+                job.stage_detail = f"Verifying puzzle positions {job.progress['verify_done']}/{len(todo)}"
+
+        job.stage_detail = f"Verifying puzzle positions 0/{len(todo)}"
+        await asyncio.gather(*(run_one(g, ply, fen) for g, ply, fen in todo))
+        if job.cancel_requested:
+            raise asyncio.CancelledError
+
     def _report(self, job: Job, games: list[ParsedGame]) -> None:
         job.status = "reporting"
         job.stage_detail = "Building report"
@@ -226,14 +270,19 @@ class JobManager:
         for g in games:
             raw = g.headers.get("_raw_analysis")
             evals = raw.get("evals") if isinstance(raw, dict) else None
+            multipv = raw.get("multipv") if isinstance(raw, dict) else None
             try:
-                annotations[g.id] = annotate(g, evals)
+                annotations[g.id] = annotate(g, evals, multipv)
             except Exception as exc:  # noqa: BLE001
                 log.warning("annotation failed for %s: %s", g.id, exc)
         player = self.db.get_player(job.username) or {}
+        previous = self.db.history(job.username, limit=1)
         report = build_report(job.username, player.get("profile", {}), player.get("stats", {}), games, annotations,
-                              job.options)
+                              job.options, previous=previous[0] if previous else None)
+        summaries = {row["id"]: row for row in report.pop("games")}
+        self.db.save_game_summaries(job.username, summaries)
         self.db.save_report(job.username, options_key(job.options), report)
+        self.db.add_history(job.username, report_summary(report))
         job.progress["report_key"] = options_key(job.options)
 
 
@@ -244,8 +293,8 @@ def game_detail(db: Database, username: str, game_id: str) -> dict[str, Any] | N
     g = parse_game(raw, username)
     if g is None:
         return None
-    evals = (raw.get("_analysis") or {}).get("evals")
-    ann = annotate(g, evals)
+    analysis = raw.get("_analysis") or {}
+    ann = annotate(g, analysis.get("evals"), analysis.get("multipv"))
     info = g.to_dict()
     info.pop("moves", None)
     info.pop("headers", None)

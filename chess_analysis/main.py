@@ -5,7 +5,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -82,6 +82,35 @@ def create_app(db: Database | None = None, pool: EnginePool | None = None) -> Fa
         if rep is None:
             raise HTTPException(404, "no report yet for this player")
         return JSONResponse(rep)
+
+    @app.get("/api/players/{username}/games")
+    def player_games(
+        username: str,
+        offset: int = Query(0, ge=0),
+        limit: int = Query(50, ge=1, le=200),
+        time_class: str | None = None,
+        result: str | None = None,
+        color: str | None = None,
+        analyzed: bool = False,
+        q: str | None = None,
+    ) -> dict[str, Any]:
+        try:
+            username = normalize_username(username)
+        except ChessComError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        games, total = app.state.db.list_game_summaries(
+            username, offset=offset, limit=limit, time_class=time_class or None, result=result or None,
+            color=color or None, analyzed=analyzed, query=(q or "").strip()[:60] or None,
+        )
+        return {"games": games, "total": total, "offset": offset, "limit": limit}
+
+    @app.get("/api/players/{username}/history")
+    def player_history(username: str) -> list[dict[str, Any]]:
+        try:
+            username = normalize_username(username)
+        except ChessComError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return app.state.db.history(username)
 
     @app.get("/api/games/{username}/{game_id:path}")
     def game(username: str, game_id: str) -> Any:

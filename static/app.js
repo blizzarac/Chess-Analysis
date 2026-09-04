@@ -182,23 +182,36 @@
   const noEngine = () => `<section class="panel"><h3>No engine analysis</h3><p class="muted">Stockfish analysis was not run for this player. Install Stockfish (set STOCKFISH_PATH) and analyse again to unlock accuracy, tactics and puzzle sections.</p></section>`;
 
   // ---------- overview ------------------------------------------------------------------------
+  function delta(cur, prev, digits, suffix, invert) {
+    if (cur == null || prev == null) return "";
+    const d = cur - prev;
+    if (Math.abs(d) < Math.pow(10, -(digits || 0)) / 2) return `<span class="delta flat">no change</span>`;
+    const good = invert ? d < 0 : d > 0;
+    return `<span class="delta ${good ? "up" : "down"}">${d > 0 ? "+" : ""}${d.toFixed(digits || 0)}${suffix || ""} since last report</span>`;
+  }
   function renderOverview() {
-    const r = state.report, ov = r.overview, acc = r.accuracy;
+    const r = state.report, ov = r.overview, acc = r.accuracy, prev = r.previous || null;
     const tcRows = Object.entries(ov.by_time_class).map(([tc, e]) => `
       <tr><td>${esc(cap(tc))}</td><td class="num">${e.games}</td><td>${wdl(e)}</td><td class="num">${pct(e.score)}</td>
       <td class="num">${num(e.rating_now)}</td><td class="num">${num(e.rating_peak)}</td><td class="num">${pct(e.as_white.score)}</td><td class="num">${pct(e.as_black.score)}</td></tr>`).join("");
     mount(`
-      ${head("Overview", `${ov.games_total} games from ${dateOf(ov.first_game)} to ${dateOf(ov.last_game)}. ${ov.games_analyzed} of the most recent games were run through Stockfish at depth ${r.options.depth}.`)}
+      ${head("Overview", `${ov.games_total} games from ${dateOf(ov.first_game)} to ${dateOf(ov.last_game)}. ${ov.games_analyzed} of the most recent games were run through Stockfish at depth ${r.options.depth}.${ov.unknown_result_codes ? ` ${ov.unknown_result_codes} games had a result code this tool doesn't know and were counted as losses.` : ""}`)}
       <div class="tiles">
         ${tile("Games", ov.games_total, `${ov.rated} rated`)}
         ${tile("Score", pct(ov.all.score), `${ov.all.wins}W ${ov.all.draws}D ${ov.all.losses}L`, scoreClass(ov.all.score, 50))}
         ${tile("As White", pct(ov.by_color.white.score), `${ov.by_color.white.games} games`, scoreClass(ov.by_color.white.score, ov.all.score))}
         ${tile("As Black", pct(ov.by_color.black.score), `${ov.by_color.black.games} games`, scoreClass(ov.by_color.black.score, ov.all.score))}
-        ${acc.available ? tile("Accuracy", fmt(acc.overall.accuracy), `avg. centipawn loss ${fmt(acc.overall.acpl, 0)}`) : ""}
+        ${acc.available ? tile("Accuracy", fmt(acc.overall.accuracy), `avg. centipawn loss ${fmt(acc.overall.acpl, 0)}`) + "" : ""}
         ${acc.available ? tile("Blunders / game", fmt(acc.overall.blunders_per_game, 2), `${acc.overall.mistakes_per_game} mistakes`, acc.overall.blunders_per_game > 1 ? "bad" : "") : ""}
         ${tile("Longest win streak", ov.streaks.longest_win, `longest losing streak ${ov.streaks.longest_loss}`)}
         ${tile("Avg. game length", fmt(ov.avg_game_length_moves, 0), `moves${ov.puzzle_rating ? ` · puzzle rating ${ov.puzzle_rating}` : ""}`)}
       </div>
+      ${prev && prev.games_total ? panel("Since your last report", `Previous report from ${dateOf(prev.generated_at)} covered ${prev.games_total} games.`, `<div class="deltas">
+        <div>Games <strong>${ov.games_total - prev.games_total >= 0 ? "+" : ""}${ov.games_total - prev.games_total}</strong></div>
+        <div>Score ${delta(ov.all.score, prev.score, 1, "%") || "–"}</div>
+        ${acc.available ? `<div>Accuracy ${delta(acc.overall.accuracy, prev.accuracy, 1) || "–"}</div><div>Blunders / game ${delta(acc.overall.blunders_per_game, prev.blunders_per_game, 2, "", true) || "–"}</div><div>Conversion ${delta(acc.winning_positions.conversion_pct, prev.conversion_pct, 0, "%") || "–"}</div>` : ""}
+        ${Object.entries(ov.by_time_class).map(([tc, e]) => prev.ratings && prev.ratings[tc] != null ? `<div>${cap(tc)} rating ${delta(e.rating_now, prev.ratings[tc], 0) || "–"}</div>` : "").join("")}
+      </div>`) : ""}
       ${panel("Rating over time", "Your rating after each rated game, per time class.", `<div id="rating-chart"></div><div class="legend" id="rating-legend"></div>`)}
       <div class="grid-2">
         ${panel("Results by time class", "", `<div class="table-wrap"><table class="data"><thead><tr><th>Class</th><th class="num">Games</th><th>W / D / L</th><th class="num">Score</th><th class="num">Rating</th><th class="num">Peak</th><th class="num">White</th><th class="num">Black</th></tr></thead><tbody>${tcRows}</tbody></table></div>`)}
@@ -273,11 +286,19 @@
   }
   function renderOpenings() {
     const r = state.report, op = r.openings, base = r.overview.all.score;
-    const table = (rows, color) => `<div class="table-wrap"><table class="data"><thead><tr><th>Opening</th><th class="num">Games</th><th>W / D / L</th><th class="num">Score</th><th class="num">Accuracy</th><th class="num">Eval after move 10</th><th class="num">Early errors</th></tr></thead><tbody>
-      ${rows.map(o => `<tr class="clickable" data-open="${esc(o.example_ids[0] || "")}" title="Open the most recent game"><td>${esc(o.name)}${o.eco ? ` <span class="muted small">${esc(o.eco)}</span>` : ""}</td><td class="num">${o.games}</td><td>${wdl(o)}</td><td class="num ${scoreClass(o.score, base)}">${pct(o.score)}</td><td class="num">${fmt(o.accuracy)}</td><td class="num">${o.avg_eval_after_opening == null ? "–" : evalText(o.avg_eval_after_opening)}</td><td class="num">${o.opening_blunders}</td></tr>`).join("")}</tbody></table></div>`;
+    const mistakes = o => (o.typical_mistakes || []).map(m => `<div class="small"><span class="mono">${Math.ceil(m.ply / 2)}${m.ply % 2 ? "." : "…"} ${esc(m.san)}</span> <span class="cls ${m.class}">${m.class}</span> in ${m.games} game${m.games > 1 ? "s" : ""}${m.best_san ? `, better <span class="mono">${esc(m.best_san)}</span>` : ""}</div>`).join("") || '<span class="muted small">–</span>';
+    const table = (rows, color) => `<div class="table-wrap"><table class="data"><thead><tr><th>Opening</th><th class="num">Games</th><th>W / D / L</th><th class="num">Score</th><th class="num">Accuracy</th><th class="num">Eval after move 10</th><th>Where you first go wrong</th></tr></thead><tbody>
+      ${rows.map(o => `<tr class="clickable" data-open="${esc(o.example_ids[0] || "")}" title="Open the most recent game"><td>${esc(o.name)}${o.eco ? ` <span class="muted small">${esc(o.eco)}</span>` : ""}</td><td class="num">${o.games}</td><td>${wdl(o)}</td><td class="num ${scoreClass(o.score, base)}">${pct(o.score)}</td><td class="num">${fmt(o.accuracy)}</td><td class="num">${o.avg_eval_after_opening == null ? "–" : evalText(o.avg_eval_after_opening)}</td><td>${mistakes(o)}</td></tr>`).join("")}</tbody></table></div>`;
+    const devs = color => {
+      const d = op[color].deviations || [], lb = op[color].left_book_first || {};
+      const intro = `<div class="sub">Against a compact book of ${"~200"} standard lines. You left the book first in ${lb.player || 0} games, your opponents in ${lb.opponent || 0}.</div>`;
+      if (!d.length) return intro + '<span class="muted small">No departures recorded.</span>';
+      return intro + `<div class="table-wrap"><table class="data"><thead><tr><th>Your move</th><th>Book expects</th><th class="num">Games</th><th>W / D / L</th><th class="num">Score</th></tr></thead><tbody>${d.map(x => `<tr><td class="mono">${Math.ceil(x.ply / 2)}${x.ply % 2 ? "." : "…"} ${esc(x.san)}</td><td class="mono small">${x.book_moves.map(esc).join(" / ")}</td><td class="num">${x.games}</td><td>${wdl(x)}</td><td class="num ${scoreClass(x.score, base)}">${pct(x.score)}</td></tr>`).join("")}</tbody></table></div>`;
+    };
     const side = color => `<div class="grid-32">
       ${panel(`As ${cap(color)}`, `${op[color].games} games, ${op[color].distinct_openings} distinct openings (chess.com's classification). Score is coloured against your overall ${pct(base)}. Eval is from your side after 10 moves.`, table(op[color].openings.slice(0, 15), color))}
-      ${panel(`${cap(color)} repertoire map`, "The first five moves of each game, with how often each branch occurs and how it scores. Click a line to expand.", `<div class="tree">${treeHtml(op[color].tree, 0) || '<span class="muted">No games.</span>'}</div>`)}</div>`;
+      <div class="stack">${panel(`${cap(color)} repertoire map`, "The first five moves of each game, with how often each branch occurs and how it scores. Click a line to expand.", `<div class="tree">${treeHtml(op[color].tree, 0) || '<span class="muted">No games.</span>'}</div>`)}
+      ${panel(`Where you leave theory as ${cap(color)}`, "", devs(color))}</div></div>`;
     mount(`${head("Openings", "What you actually play, and what it does to your results. Look for lines with many games and a low score: that is where a few hours of study pay off fastest.")}
       ${side("white")}${side("black")}`);
     document.querySelectorAll("tr[data-open]").forEach(tr => tr.addEventListener("click", () => tr.dataset.open && openGame(tr.dataset.open)));
@@ -371,8 +392,8 @@
   function renderGames() {
     const r = state.report;
     const f = state.gamesFilter;
-    const tcs = [...new Set(r.games.map(g => g.time_class))];
-    mount(`${head("Games", `${r.games.length} games. Click a row to open the analysis board.`)}
+    const tcs = Object.keys(r.overview.by_time_class);
+    mount(`${head("Games", `${r.overview.games_total} games. Click a row to open the analysis board.`)}
       <section class="panel">
         <div class="filters">
           <select id="f-tc"><option value="">All time classes</option>${tcs.map(t => `<option ${f.tc === t ? "selected" : ""}>${esc(t)}</option>`).join("")}</select>
@@ -385,24 +406,25 @@
         <div class="pager"><button class="btn small" id="pg-prev">‹ Prev</button><span id="pg-info" class="muted small"></span><button class="btn small" id="pg-next">Next ›</button></div>
       </section>`);
     const PAGE = 50;
-    let page = 0;
-    const draw = () => {
-      f.tc = $("#f-tc").value; f.result = $("#f-result").value; f.color = $("#f-color").value; f.analyzed = $("#f-analyzed").checked; f.q = $("#f-search").value.toLowerCase();
-      const rows = r.games.filter(g => (!f.tc || g.time_class === f.tc) && (!f.result || g.result === f.result) && (!f.color || g.color === f.color) && (!f.analyzed || g.analyzed)
-        && (!f.q || (g.opponent || "").toLowerCase().includes(f.q) || (g.opening || "").toLowerCase().includes(f.q)));
-      const pages = Math.max(1, Math.ceil(rows.length / PAGE));
-      page = Math.min(page, pages - 1);
-      const slice = rows.slice(page * PAGE, page * PAGE + PAGE);
-      $("#games-table tbody").innerHTML = slice.map(g => `<tr class="clickable" data-id="${esc(g.id)}">
+    let page = 0, timer = null;
+    const draw = async () => {
+      f.tc = $("#f-tc").value; f.result = $("#f-result").value; f.color = $("#f-color").value; f.analyzed = $("#f-analyzed").checked; f.q = $("#f-search").value;
+      const params = new URLSearchParams({ offset: page * PAGE, limit: PAGE });
+      if (f.tc) params.set("time_class", f.tc); if (f.result) params.set("result", f.result); if (f.color) params.set("color", f.color);
+      if (f.analyzed) params.set("analyzed", "true"); if (f.q) params.set("q", f.q);
+      let data;
+      try { data = await api(`/api/players/${encodeURIComponent(state.username)}/games?${params}`); } catch (err) { $("#pg-info").textContent = err.message; return; }
+      const pages = Math.max(1, Math.ceil(data.total / PAGE));
+      $("#games-table tbody").innerHTML = data.games.map(g => `<tr class="clickable" data-id="${esc(g.id)}">
         <td class="mono small">${dateOf(g.date)}</td><td>${esc(g.time_class)} <span class="muted small">${esc(g.time_control)}</span></td><td>${g.color === "white" ? "♔ White" : "♚ Black"}</td>
         <td>${esc(g.opponent)} <span class="muted small">${num(g.opponent_rating)}</span></td><td><span class="pill ${g.result}">${g.result}</span> <span class="muted small">${esc(g.termination)}</span></td>
-        <td class="small">${esc(g.opening || "")}</td><td class="num">${g.moves}</td><td class="num">${g.analyzed ? fmt(g.accuracy) : '<span class="muted">–</span>'}</td><td class="num">${g.analyzed ? g.blunders : "–"}</td></tr>`).join("");
-      $("#pg-info").textContent = `${rows.length} games · page ${page + 1} of ${pages}`;
+        <td class="small">${esc(g.opening || "")}</td><td class="num">${g.moves}</td><td class="num">${g.analyzed ? fmt(g.accuracy) : '<span class="muted">–</span>'}</td><td class="num">${g.analyzed ? g.blunders : "–"}</td></tr>`).join("") || '<tr><td colspan="9" class="muted">No games match.</td></tr>';
+      $("#pg-info").textContent = `${data.total} games · page ${page + 1} of ${pages}`;
       $("#pg-prev").disabled = page === 0; $("#pg-next").disabled = page >= pages - 1;
       document.querySelectorAll("#games-table tr[data-id]").forEach(tr => tr.addEventListener("click", () => openGame(tr.dataset.id)));
     };
     ["#f-tc", "#f-result", "#f-color", "#f-analyzed"].forEach(s => $(s).addEventListener("change", () => { page = 0; draw(); }));
-    $("#f-search").addEventListener("input", () => { page = 0; draw(); });
+    $("#f-search").addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(() => { page = 0; draw(); }, 250); });
     $("#pg-prev").addEventListener("click", () => { page--; draw(); });
     $("#pg-next").addEventListener("click", () => { page++; draw(); });
     draw();
@@ -509,14 +531,36 @@
   const TAGS = { missed_mate: "Missed a forced mate", allowed_mate: "Allowed a forced mate", hung_piece: "Hung a piece", lost_material: "Lost material", missed_material: "Missed a material win", bad_trade: "Bad trade", walked_into_fork: "Walked into a fork", threw_away_win: "Threw away a winning position", collapsed: "Went from equal to lost", time_trouble: "Time trouble", rushed: "Rushed (under 2s)", missed_opponent_blunder: "Missed the opponent's blunder" };
 
   // ---------- training (puzzles) --------------------------------------------------------------
+  const SRS = {
+    key: () => `puzzles:${state.username}`,
+    load() { try { return JSON.parse(localStorage.getItem(this.key()) || "{}"); } catch (e) { return {}; } },
+    save(d) { try { localStorage.setItem(this.key(), JSON.stringify(d)); } catch (e) { /* ignore */ } },
+    id: p => `${p.game_id}:${p.ply}`,
+    record(p, ok) {
+      const d = this.load(); const e = d[this.id(p)] || { box: 0, seen: 0, fails: 0 };
+      e.seen++; if (ok) e.box = Math.min(5, e.box + 1); else { e.box = 0; e.fails++; }
+      e.next = Date.now() + [0, 1, 3, 7, 14, 30][e.box] * 86400000; e.last = Date.now();
+      d[this.id(p)] = e; this.save(d); return e;
+    },
+    order(list) {
+      const d = this.load(), now = Date.now();
+      // failed and due first, then unseen, then not-yet-due; keep the report's own priority inside each group
+      const rank = p => { const e = d[this.id(p)]; if (!e) return 1; if (e.next <= now) return e.fails ? -1 : 0; return 2; };
+      return list.map((p, i) => ({ p, i })).sort((a, b) => rank(a.p) - rank(b.p) || a.i - b.i).map(x => x.p);
+    },
+  };
   function renderTraining() {
     const r = state.report, ps = r.puzzles || [];
     if (!ps.length) { mount(head("Training") + `<section class="panel"><p class="muted">No puzzles yet: puzzles are built from engine-analysed games where you missed a clearly better move.</p></section>`); return; }
     const themes = ["all", ...new Set(ps.map(p => p.theme))];
     const T = state.puzzles;
-    const list = ps.filter(p => T.theme === "all" || p.theme === T.theme);
+    const list = SRS.order(ps.filter(p => T.theme === "all" || p.theme === T.theme));
     if (T.index >= list.length) T.index = 0;
-    mount(`${head("Training", "Positions from your own games where you went wrong. Find the move the engine preferred: click the piece, then the destination square. These are the patterns you personally miss, so they are worth more than random puzzles.")}
+    const srs = SRS.load();
+    const due = list.filter(p => srs[SRS.id(p)] && srs[SRS.id(p)].next <= Date.now()).length;
+    const unseen = list.filter(p => !srs[SRS.id(p)]).length;
+    mount(`${head("Training", "Positions from your own games where you went wrong. Find the move the engine preferred: click the piece, then the destination square. Positions you fail come back sooner; positions you solve return after 1, 3, 7, 14 and 30 days.")}
+      <div class="tiles" style="margin-bottom:.8rem">${tile("Due for review", due, "solved before, time to repeat")}${tile("New", unseen, "never attempted")}${tile("Verified", ps.filter(p => p.verified).length, "checked with three engine lines")}</div>
       <div class="theme-chips">${themes.map(t => `<button class="btn small ${T.theme === t ? "on" : ""}" data-theme="${esc(t)}">${esc(t === "all" ? `All (${ps.length})` : `${TAGS[t] || t} (${ps.filter(p => p.theme === t).length})`)}</button>`).join("")}</div>
       <div class="puzzle-layout">
         <div><div id="pboard"></div>
@@ -530,31 +574,37 @@
     let sel = null, done = false;
     const show = () => {
       const p = list[T.index];
-      sel = null; done = !!T.solved[p.game_id + p.ply];
+      sel = null; done = false;
+      const hist = SRS.load()[SRS.id(p)];
       board.flipped = p.side === "black";
       board.setPosition(p.fen, {}, []);
       $("#p-count").textContent = `${T.index + 1} / ${list.length}`;
-      $("#p-prompt").innerHTML = `<div class="eyebrow">${esc(p.theme_label)}</div><h3>${cap(p.side)} to move</h3><p class="muted small">vs ${esc(p.opponent)} · ${dateOf(p.date)} · move ${Math.ceil(p.ply / 2)}. In the game you played <strong class="mono">${esc(p.played)}</strong> and lost ${fmt(p.win_loss, 0)}% win chance.</p>`;
-      $("#p-status").textContent = done ? "Solved earlier." : "";
+      const alts = (p.accepted_san || []).length > 1 ? ` <span class="pill">${p.accepted_san.length} answers accepted</span>` : (p.only_move ? ' <span class="pill">only move</span>' : "");
+      $("#p-prompt").innerHTML = `<div class="eyebrow">${esc(p.theme_label)}</div><h3>${cap(p.side)} to move${alts}</h3><p class="muted small">vs ${esc(p.opponent)} · ${dateOf(p.date)} · move ${Math.ceil(p.ply / 2)}. In the game you played <strong class="mono">${esc(p.played)}</strong> and lost ${fmt(p.win_loss, 0)}% win chance.${hist ? ` Attempted ${hist.seen}×, ${hist.fails} fail${hist.fails === 1 ? "" : "s"}.` : ""}</p>`;
+      $("#p-status").textContent = "";
       $("#p-detail").textContent = "";
-      if (done) reveal(p, false);
     };
-    const reveal = (p, wrong) => {
+    const reveal = (p) => {
       done = true;
-      board.setPosition(p.fen, { [p.best.slice(0, 2)]: "ok", [p.best.slice(2, 4)]: "ok" }, [{ from: p.best.slice(0, 2), to: p.best.slice(2, 4), color: "var(--good)" }]);
-      $("#p-detail").textContent = `Best: ${p.best_san}. Line: ${p.pv.join(" ")}.`;
+      const marks = {}, arrows = [];
+      (p.accepted || [p.best]).forEach((u, i) => { marks[u.slice(0, 2)] = "ok"; marks[u.slice(2, 4)] = "ok"; arrows.push({ from: u.slice(0, 2), to: u.slice(2, 4), color: i ? "var(--info)" : "var(--good)" }); });
+      board.setPosition(p.fen, marks, arrows);
+      $("#p-detail").textContent = `Best: ${p.best_san}${(p.accepted_san || []).length > 1 ? ` (also fine: ${p.accepted_san.slice(1).join(", ")})` : ""}. Line: ${p.pv.join(" ")}.`;
     };
+    let wrongTries = 0;
     board.onSquare = sq => {
       const p = list[T.index];
       if (done) return;
       if (!sel) { sel = sq; board.setPosition(p.fen, { [sq]: "sel" }, []); return; }
       const guess = sel + sq;
-      if (guess === p.best) {
-        T.solved[p.game_id + p.ply] = true;
-        $("#p-status").textContent = "Correct!";
-        reveal(p, false);
+      const ok = (p.accepted || [p.best]).some(u => u.slice(0, 4) === guess);
+      if (ok) {
+        SRS.record(p, wrongTries === 0); wrongTries = 0;
+        $("#p-status").textContent = guess === p.best.slice(0, 4) ? "Correct!" : "Correct (an alternative the engine rates just as well).";
+        reveal(p);
       } else if (sq === sel) { sel = null; board.setPosition(p.fen, {}, []); }
       else {
+        wrongTries++;
         $("#p-status").textContent = `${sel}${sq} is not it. Try again.`;
         board.setPosition(p.fen, { [sel]: "wrong", [sq]: "wrong" }, []);
         sel = null;
@@ -562,7 +612,7 @@
     };
     $("#p-prev").onclick = () => { T.index = (T.index - 1 + list.length) % list.length; show(); };
     $("#p-next").onclick = () => { T.index = (T.index + 1) % list.length; show(); };
-    $("#p-solution").onclick = () => { $("#p-status").textContent = "Solution"; reveal(list[T.index], false); };
+    $("#p-solution").onclick = () => { if (!done) SRS.record(list[T.index], false); $("#p-status").textContent = "Solution"; reveal(list[T.index]); };
     $("#p-game").onclick = () => openGame(list[T.index].game_id, list[T.index].ply);
     show();
   }
