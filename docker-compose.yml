@@ -1,0 +1,49 @@
+# Single-server deployment: Caddy terminates TLS, the web container serves the site and API,
+# the worker container runs downloads and Stockfish. Both share the SQLite database on a volume.
+services:
+  web:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      INLINE_WORKER: "0"
+      TRUST_PROXY: "1"
+      COOKIE_SECURE: "1"
+      HOST: 0.0.0.0
+      PORT: "8000"
+    volumes:
+      - data:/data
+    expose:
+      - "8000"
+
+  worker:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    command: ["python", "-m", "chess_analysis.worker"]
+    volumes:
+      - data:/data
+    # Stockfish uses ENGINE_WORKERS cores; leave one for the web container.
+    deploy:
+      resources:
+        limits:
+          memory: 2g
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - web
+
+volumes:
+  data:
+  caddy_data:
+  caddy_config:

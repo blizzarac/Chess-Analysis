@@ -2,7 +2,7 @@
 (function () {
   "use strict";
   const $ = sel => document.querySelector(sel);
-  const state = { username: null, report: null, job: null, tab: "overview", puzzles: { index: 0, theme: "all", solved: {} }, gamesFilter: {} };
+  const state = { username: null, report: null, job: null, tab: "overview", puzzles: { index: 0, theme: "all", solved: {} }, gamesFilter: {}, status: null, account: null, me: null };
 
   // ---------- helpers -----------------------------------------------------------------------
   const esc = s => String(s == null ? "" : s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -78,6 +78,9 @@
   function route() {
     const hash = location.hash.replace(/^#\/?/, "");
     const [user, tab, sub] = hash.split("/");
+    $("#account-page").hidden = true;
+    if (user === "login" && tab) { verifyLogin(tab); return; }
+    if (user === "account") { showAccountPage(); return; }
     if (!user) { showLanding(); return; }
     state.tab = TABS.includes(tab) ? tab : "overview";
     if (state.username !== user || !state.report) {
@@ -92,18 +95,98 @@
   function showLanding() {
     $("#landing").hidden = false; $("#progress").hidden = true; $("#report").hidden = true;
     state.username = null; state.report = null;
-    loadRecent();
+    renderLandingSide();
   }
-  async function loadRecent() {
+  async function loadStatus() {
     try {
-      const [players, status] = await Promise.all([api("/api/players"), api("/api/status")]);
-      const ul = $("#recent-players");
-      ul.innerHTML = players.length ? players.map(p => `<li><a href="#/${esc(p.username)}"><span>${esc(p.username)}</span><span class="num">${p.games} games · ${p.analyzed} analysed</span></a></li>`).join("") : '<li class="muted">None yet.</li>';
-      $("#engine-status").textContent = status.engine.available
-        ? `Stockfish ready (${status.engine.workers} worker${status.engine.workers > 1 ? "s" : ""}).`
-        : "Stockfish not found: set STOCKFISH_PATH to enable engine analysis.";
-      if (status.mock) $("#engine-status").textContent += " Running against offline mock data.";
-    } catch (e) { /* offline */ }
+      state.status = await api("/api/status");
+      state.account = state.status.account;
+    } catch (e) { state.status = null; }
+    renderAccountArea();
+    renderCapsNote();
+    if (state.status && state.status.contact_email) $("#foot-contact").innerHTML = `Questions or removal requests: <a href="mailto:${esc(state.status.contact_email)}">${esc(state.status.contact_email)}</a>`;
+  }
+  const capsLine = c => `${c.max_engine_games} games through the engine, depth up to ${c.max_depth}, ${c.max_months ? `${c.max_months} months of history` : "full history"}, ${c.jobs_per_day} analyses a day`;
+  function renderCapsNote() {
+    const st = state.status; if (!st) return;
+    const c = st.caps;
+    $("#max-games").max = c.max_engine_games; if (+$("#max-games").value > c.max_engine_games) $("#max-games").value = c.max_engine_games;
+    document.querySelectorAll('input[name=depth]').forEach(r => { r.disabled = +r.value > c.max_depth; if (r.disabled && r.checked) document.querySelector('input[name=depth][value="10"]').checked = true; });
+    if (c.max_months) $("#max-months").max = c.max_months;
+    $("#caps-note").textContent = (state.account ? "Your limits: " : "Limits for visitors: ") + capsLine(c) + "." +
+      (!state.account ? ` Signed-in members get ${capsLine(st.tiers.user)}.` : "");
+  }
+  async function renderLandingSide() {
+    const side = $("#landing-side"); const st = state.status;
+    const engine = st ? (st.engine.available ? `Stockfish ready (${st.engine.workers} worker${st.engine.workers > 1 ? "s" : ""}).` : "Engine not available on this server.") + (st.mock ? " Running against offline mock data." : "") : "";
+    if (state.account) {
+      let me = null; try { me = await api("/api/me"); state.me = me; } catch (e) { /* ignore */ }
+      const players = (me && me.players) || [];
+      side.innerHTML = `<h2 class="eyebrow">Your players</h2><ul class="recent-list">${players.length ? players.map(p => `<li><a href="#/${esc(p.username)}"><span>${esc(p.username)}</span><span class="num">${p.games} games · ${p.analyzed} analysed</span></a></li>`).join("") : '<li class="muted">None saved yet. Open a report and press "Save player".</li>'}</ul>
+        ${me ? `<p class="muted small" style="margin-top:.8rem">${me.usage.jobs_today} of ${me.usage.jobs_per_day} analyses used today. <a href="#/account">Account</a></p>` : ""}<p class="muted small">${esc(engine)}</p>`;
+    } else {
+      side.innerHTML = `<h2 class="eyebrow">Free to use</h2><p class="small">Anyone can analyse a player: ${st ? capsLine(st.tiers.anonymous) : ""}.</p>
+        <p class="small"><strong>Sign in</strong> (just an email, no password) to get ${st ? capsLine(st.tiers.user) : "higher limits"}, keep a list of your players, and have your puzzle progress follow you between devices.</p>
+        <button type="button" class="btn primary" id="landing-signin">Sign in</button><p class="muted small" style="margin-top:1rem">${esc(engine)}</p>`;
+      $("#landing-signin").addEventListener("click", openSignin);
+    }
+  }
+  // ---------- accounts ------------------------------------------------------------------------
+  function renderAccountArea() {
+    const el = $("#account-area");
+    if (state.account) {
+      el.innerHTML = `<a href="#/account" class="email" title="${esc(state.account.email)}">${esc(state.account.email)}</a><button type="button" class="btn ghost small" id="signout">Sign out</button>`;
+      $("#signout").addEventListener("click", async () => { try { await api("/api/auth/logout", { method: "POST" }); } catch (e) { /* ignore */ } state.account = null; state.me = null; await loadStatus(); route(); });
+    } else {
+      el.innerHTML = `<button type="button" class="btn ghost small" id="signin-btn">Sign in</button>`;
+      $("#signin-btn").addEventListener("click", openSignin);
+    }
+  }
+  function openSignin() {
+    const st = state.status;
+    $("#signin-perks").innerHTML = st ? `<li>${capsLine(st.tiers.user)}</li><li>Saved players and puzzle progress on every device</li>` : "";
+    $("#signin-msg").textContent = st && !st.email_enabled ? "This server has no email sending configured; the link will be shown here instead." : "";
+    $("#signin").hidden = false; $("#signin-email").focus();
+  }
+  $("#signin-close").addEventListener("click", () => { $("#signin").hidden = true; });
+  $("#signin").addEventListener("click", e => { if (e.target === $("#signin")) $("#signin").hidden = true; });
+  $("#signin-form").addEventListener("submit", async e => {
+    e.preventDefault();
+    const msg = $("#signin-msg"); msg.textContent = "Sending…";
+    try {
+      const r = await api("/api/auth/request-link", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email: $("#signin-email").value }) });
+      msg.innerHTML = r.sent ? `Check <strong>${esc(r.email)}</strong> for your sign-in link. It expires in 15 minutes.` : (r.dev_link ? `No mail server configured. <a href="${esc(r.dev_link)}">Use this link to sign in</a>.` : "The email could not be sent.");
+    } catch (err) { msg.textContent = err.message; }
+  });
+  async function verifyLogin(token) {
+    $("#landing").hidden = true; $("#report").hidden = true; $("#progress").hidden = false;
+    $("#progress-title").textContent = "Signing you in…"; $("#progress-detail").textContent = ""; $("#progress-error").hidden = true;
+    try {
+      await api("/api/auth/verify", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ token }) });
+      await loadStatus();
+      $("#signin").hidden = true;
+      location.hash = "#/account";
+    } catch (err) {
+      $("#progress-error").hidden = false; $("#progress-error").textContent = err.message;
+      $("#progress-title").textContent = "Could not sign in";
+    }
+  }
+  async function showAccountPage() {
+    if (!state.account) { openSignin(); showLanding(); return; }
+    $("#landing").hidden = true; $("#progress").hidden = true; $("#report").hidden = true;
+    const page = $("#account-page"); page.hidden = false; page.innerHTML = "<p class='muted'>Loading…</p>";
+    let me; try { me = await api("/api/me"); state.me = me; } catch (err) { page.innerHTML = `<p class="error">${esc(err.message)}</p>`; return; }
+    const c = me.caps, u = me.usage;
+    page.innerHTML = `${head("Your account", me.account.email)}
+      <div class="grid-2">
+        ${panel("Limits", me.account.admin ? "Administrator account." : "What your account can run.", `<table class="data caps-table"><tbody>
+          <tr><td>Games through the engine</td><td class="num">${c.max_engine_games}</td></tr><tr><td>Maximum depth</td><td class="num">${c.max_depth}</td></tr>
+          <tr><td>History</td><td class="num">${c.max_months ? c.max_months + " months" : "everything"}</td></tr><tr><td>Analyses per day</td><td class="num">${u.jobs_today} / ${c.jobs_per_day}</td></tr></tbody></table>
+          <div class="usage-bar"><div style="width:${Math.min(100, 100 * u.jobs_today / c.jobs_per_day)}%"></div></div>`)}
+        ${panel("Your players", "Reports you have saved. Puzzle progress is kept per player.", `<ul class="recent-list" id="acct-players">${me.players.length ? me.players.map(p => `<li><a href="#/${esc(p.username)}"><span>${esc(p.username)}</span><span class="num">${p.games} games</span></a><button type="button" class="btn ghost small" data-unsave="${esc(p.username)}">remove</button></li>`).join("") : '<li class="muted">None yet. Open a report and press "Save player".</li>'}</ul>`)}
+      </div>
+      ${panel("Your data", "", `<p class="small">We store your email address, which players you saved, and your puzzle progress. Reports are built from public chess.com games and are shared by everyone who looks up the same player. ${state.status && state.status.contact_email ? `To delete your account or request removal of a player's report, email <a href="mailto:${esc(state.status.contact_email)}">${esc(state.status.contact_email)}</a>.` : ""}</p>`)}`;
+    document.querySelectorAll("[data-unsave]").forEach(b => b.addEventListener("click", async () => { await api(`/api/me/players/${encodeURIComponent(b.dataset.unsave)}`, { method: "DELETE" }); showAccountPage(); }));
   }
 
   // ---------- analyze form & progress ---------------------------------------------------------
@@ -167,7 +250,9 @@
     });
     const p = job.progress || {};
     let frac = 0, detail = job.stage_detail || "";
-    if (job.status === "fetching") {
+    if (job.status === "queued") {
+      detail = job.queue_position > 1 ? `Waiting in the queue: position ${job.queue_position}` : "Waiting for a free worker";
+    } else if (job.status === "fetching") {
       const todo = (p.months_total || 0) - (p.months_cached || 0);
       frac = todo ? (p.months_done || 0) / todo * 0.25 : 0.25;
       detail += p.games_downloaded ? ` · ${p.games_downloaded} new games` : "";
@@ -184,6 +269,7 @@
   // ---------- report loading ------------------------------------------------------------------
   async function loadReport(user) {
     const rep = await api(`/api/report/${encodeURIComponent(user)}`);
+    if (state.username !== user) SRS.server = null;
     state.username = user; state.report = rep;
     $("#landing").hidden = true; $("#progress").hidden = true; $("#report").hidden = false;
     $("#username").value = user;
@@ -199,7 +285,18 @@
       <div class="meta">${p.name ? esc(p.name) + " · " : ""}${p.country ? esc(p.country) + " · " : ""}${ov.games_total} games · ${ov.games_analyzed} engine-analysed</div>
       <div class="ratings">${ratings}</div>
       <div class="meta" style="margin-top:.5rem">Report built ${dateOf(r.generated_at)} · depth ${r.options.depth}</div>
-      ${p.url ? `<div class="meta"><a href="${esc(p.url)}" target="_blank" rel="noopener">chess.com profile ↗</a></div>` : ""}`;
+      ${p.url ? `<div class="meta"><a href="${esc(p.url)}" target="_blank" rel="noopener">chess.com profile ↗</a></div>` : ""}
+      ${state.account ? `<div style="margin-top:.6rem"><button type="button" class="btn small" id="save-player"></button></div>` : ""}`;
+    if (state.account) {
+      const btn = $("#save-player");
+      const refresh = async () => { try { state.me = await api("/api/me"); } catch (e) { return; } const saved = state.me.players.some(x => x.username === r.player.username); btn.textContent = saved ? "Saved ✓ (remove)" : "Save player"; btn.dataset.saved = saved ? "1" : ""; };
+      btn.addEventListener("click", async () => {
+        if (btn.dataset.saved) await api(`/api/me/players/${encodeURIComponent(r.player.username)}`, { method: "DELETE" });
+        else await api("/api/me/players", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ username: r.player.username }) });
+        refresh();
+      });
+      refresh();
+    }
   }
   function renderTab() {
     document.querySelectorAll("#tabs a").forEach(a => a.classList.toggle("active", a.dataset.tab === state.tab));
@@ -590,8 +687,29 @@
   // ---------- training (puzzles) --------------------------------------------------------------
   const SRS = {
     key: () => `puzzles:${state.username}`,
-    load() { try { return JSON.parse(localStorage.getItem(this.key()) || "{}"); } catch (e) { return {}; } },
-    save(d) { try { localStorage.setItem(this.key(), JSON.stringify(d)); } catch (e) { /* ignore */ } },
+    server: null,           // progress loaded from the account, when signed in
+    _timer: null,
+    load() { if (this.server) return this.server; try { return JSON.parse(localStorage.getItem(this.key()) || "{}"); } catch (e) { return {}; } },
+    save(d) {
+      try { localStorage.setItem(this.key(), JSON.stringify(d)); } catch (e) { /* ignore */ }
+      if (state.account) {
+        this.server = d;
+        clearTimeout(this._timer);
+        this._timer = setTimeout(() => api(`/api/me/puzzles/${encodeURIComponent(state.username)}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ progress: d }) }).catch(() => {}), 400);
+      }
+    },
+    async sync() {
+      // Signed in: the account's progress wins; a device's local progress is merged in the first time.
+      this.server = null;
+      if (!state.account) return;
+      try {
+        const r = await api(`/api/me/puzzles/${encodeURIComponent(state.username)}`);
+        let local = {}; try { local = JSON.parse(localStorage.getItem(this.key()) || "{}"); } catch (e) { /* ignore */ }
+        const merged = { ...local, ...(r.progress || {}) };
+        this.server = merged;
+        if (Object.keys(local).length && Object.keys(r.progress || {}).length !== Object.keys(merged).length) this.save(merged);
+      } catch (e) { this.server = null; }
+    },
     id: p => `${p.game_id}:${p.ply}`,
     record(p, ok) {
       const d = this.load(); const e = d[this.id(p)] || { box: 0, seen: 0, fails: 0 };
@@ -607,6 +725,10 @@
     },
   };
   function renderTraining() {
+    if (state.account && SRS.server === null && !renderTraining.syncing) {
+      renderTraining.syncing = true;
+      SRS.sync().then(() => { renderTraining.syncing = false; if (state.tab === "training") renderTab(); });
+    }
     const r = state.report, ps = r.puzzles || [];
     if (!ps.length) { mount(head("Training") + `<section class="panel"><p class="muted">No puzzles yet: puzzles are built from engine-analysed games where you missed a clearly better move.</p></section>`); return; }
     const themes = ["all", ...new Set(ps.map(p => p.theme))];
@@ -678,5 +800,5 @@
   }
 
   // ---------- boot ----------------------------------------------------------------------------
-  route();
+  loadStatus().then(route);
 })();

@@ -1,0 +1,10 @@
+# Set DOMAIN in .env (e.g. chess.example.com). Caddy obtains and renews the TLS certificate.
+{$DOMAIN} {
+	encode zstd gzip
+	reverse_proxy web:8000
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+	}
+	@static path /static/*
+	header @static Cache-Control "public, max-age=3600"
+}

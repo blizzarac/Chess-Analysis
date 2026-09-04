@@ -9,6 +9,7 @@ import asyncio
 import json
 import logging
 import re
+import time
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
@@ -40,12 +41,36 @@ def normalize_username(username: str) -> str:
     return username
 
 
+class Throttle:
+    """Process-wide minimum spacing between chess.com requests. The API is shared by every
+    visitor of the site, so politeness here is what keeps the site's IP from being blocked."""
+
+    def __init__(self, min_interval: float):
+        self.min_interval = min_interval
+        self._last = 0.0
+        self._lock: asyncio.Lock | None = None
+
+    async def wait(self) -> None:
+        if self._lock is None:
+            self._lock = asyncio.Lock()
+        async with self._lock:
+            now = time.monotonic()
+            delay = self._last + self.min_interval - now
+            if delay > 0:
+                await asyncio.sleep(delay)
+            self._last = time.monotonic()
+
+
+THROTTLE = Throttle(settings.chesscom_min_interval)
+
+
 class ChessComClient:
     """Small async client. Reads from `mock_dir` when configured (tests, offline demos)."""
 
-    def __init__(self, mock_dir: Path | None = None, user_agent: str | None = None):
+    def __init__(self, mock_dir: Path | None = None, user_agent: str | None = None, throttle: Throttle | None = None):
         self.mock_dir = mock_dir if mock_dir is not None else settings.mock_dir
         self.user_agent = user_agent or settings.user_agent
+        self.throttle = throttle or THROTTLE
         self._client: httpx.AsyncClient | None = None
 
     async def __aenter__(self) -> "ChessComClient":
@@ -70,6 +95,7 @@ class ChessComClient:
         url = f"{BASE}{path}"
         delay = 1.0
         for attempt in range(5):
+            await self.throttle.wait()
             try:
                 resp = await self._client.get(url)
             except httpx.HTTPError as exc:
