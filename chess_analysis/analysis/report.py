@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import statistics
 import time
+
+import chess
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from typing import Any, Iterable
@@ -144,7 +146,8 @@ def results_section(games: list[ParsedGame]) -> dict[str, Any]:
     ordered = sorted(games, key=lambda g: g.end_time)
     after_loss, baseline, rematch_after_loss = [], [], []
     for prev, cur in zip(ordered, ordered[1:]):
-        gap = cur.end_time - prev.end_time - len(cur.moves) * 5  # rough start time
+        start = cur.start_time if cur.start_time else cur.end_time - len(cur.moves) * 5
+        gap = start - prev.end_time
         if prev.player_result == "loss" and gap < 20 * 60:
             after_loss.append(cur)
             if cur.opponent.lower() == prev.opponent.lower():
@@ -156,7 +159,8 @@ def results_section(games: list[ParsedGame]) -> dict[str, Any]:
     pos = 0
     last_t = None
     for g in ordered:
-        if last_t is None or g.end_time - last_t > 30 * 60:
+        start = g.start_time if g.start_time else g.end_time - len(g.moves) * 5
+        if last_t is None or start - last_t > 30 * 60:
             pos = 1
         else:
             pos += 1
@@ -210,6 +214,16 @@ def accuracy_section(analyzed: list[tuple[ParsedGame, dict]]) -> dict[str, Any]:
         }
 
     by_phase = {}
+    phase_examples: dict[str, dict[str, Any]] = {}
+    for g, ann in analyzed:
+        moves = ann["moves"]
+        for i, m in enumerate(moves):
+            if m["color"] == g.player_color and m.get("class") == "blunder" and m["phase"] not in phase_examples:
+                phase_examples[m["phase"]] = {"game_id": g.id, "ply": m["ply"], "san": m["san"], "uci": m["uci"],
+                                              "best": m.get("best"), "best_san": m.get("best_san"),
+                                              "fen": moves[i - 1]["fen"] if i else ann.get("start_fen"),
+                                              "side": g.player_color, "win_loss": m.get("win_loss"),
+                                              "opponent": g.opponent, "date": g.end_time}
     for ph in PHASES:
         vals = [me[f"acpl_{ph}"] for _, me in per_game if me.get(f"acpl_{ph}") is not None]
         moves = sum(me.get(f"moves_{ph}", 0) for _, me in per_game)
@@ -278,6 +292,7 @@ def accuracy_section(analyzed: list[tuple[ParsedGame, dict]]) -> dict[str, Any]:
                           for tc in sorted({g.time_class for g, _ in per_game})},
         "by_result": {r: group([(g, me) for g, me in per_game if g.player_result == r]) for r in ("win", "draw", "loss")},
         "by_phase": by_phase,
+        "phase_examples": phase_examples,
         "class_counts": dict(class_counts),
         "total_moves": total_moves,
         "by_move_number": by_move_number,
@@ -295,7 +310,8 @@ def _tree_insert(root: dict[str, Any], game: ParsedGame, ann: dict | None, max_p
     for mv in game.moves[:max_plies]:
         child = node["children"].get(mv.san)
         if child is None:
-            child = {"san": mv.san, "games": 0, "wins": 0, "draws": 0, "losses": 0, "children": {}, "ply": mv.ply}
+            child = {"san": mv.san, "games": 0, "wins": 0, "draws": 0, "losses": 0, "children": {}, "ply": mv.ply,
+                     "fen": mv.fen_after, "uci": mv.uci, "fen_before": mv.fen_before}
             node["children"][mv.san] = child
         child["games"] += 1
         child[{"win": "wins", "draw": "draws", "loss": "losses"}[game.player_result]] += 1
@@ -313,19 +329,176 @@ def _tree_finalize(node: dict[str, Any], min_games: int) -> dict[str, Any]:
         "draws": node.get("draws", 0),
         "losses": node.get("losses", 0),
         "score": _score(node.get("wins", 0), node.get("draws", 0), node.get("losses", 0)),
+        "fen": node.get("fen"),
+        "fen_before": node.get("fen_before"),
+        "uci": node.get("uci"),
         "children": [_tree_finalize(k, min_games) for k in kids[:8]],
     }
 
 
-def openings_section(games: list[ParsedGame], analyzed_by_id: dict[str, dict]) -> dict[str, Any]:
+def _fen_key(fen: str) -> str:
+    """Position identity without move counters, so transpositions at different move numbers match."""
+    return " ".join(fen.split()[:4])
+
+
+def opening_deep_dive(gs: list[ParsedGame], analyzed_by_id: dict[str, dict], color: str) -> dict[str, Any] | None:
+    """Everything that goes wrong for the player in one opening, across every game and every phase:
+    trouble spots grouped by position, the average evaluation by move, and win chance lost."""
+    anns = [(g, analyzed_by_id[g.id]) for g in gs if g.id in analyzed_by_id]
+    if not anns:
+        return None
+    spots: dict[str, dict[str, Any]] = {}
+    per_game_loss: list[float] = []
+    phase_loss: dict[str, list[float]] = {p: [] for p in PHASES}
+    curves: dict[int, list[int]] = defaultdict(list)
+    first_error_moves: list[int] = []
+    results_by_spot: dict[str, list[str]] = defaultdict(list)
+    for g, a in anns:
+        loss = 0.0
+        ph = {p: 0.0 for p in PHASES}
+        first: int | None = None
+        for i, m in enumerate(a["moves"]):
+            if m["color"] != color or "class" not in m:
+                continue
+            if m["class"] not in ("inaccuracy", "mistake", "blunder"):
+                continue
+            loss += m["win_loss"]
+            ph[m["phase"]] += m["win_loss"]
+            if first is None:
+                first = (m["ply"] + 1) // 2
+            fen_before = a["moves"][i - 1]["fen"] if i else a.get("start_fen")
+            if not fen_before:
+                continue
+            key = _fen_key(fen_before)
+            sp = spots.setdefault(key, {"fen": fen_before, "ply": m["ply"], "games": set(), "tried": Counter(),
+                                        "tried_uci": {}, "best": Counter(), "best_uci": {}, "win_loss": [],
+                                        "phase": m["phase"], "example": (g.id, m["ply"])})
+            sp["games"].add(g.id)
+            sp["tried"][m["san"]] += 1
+            sp["tried_uci"][m["san"]] = m["uci"]
+            if m.get("best_san") and m.get("best"):
+                sp["best"][m["best_san"]] += 1
+                sp["best_uci"][m["best_san"]] = m["best"]
+            sp["win_loss"].append(m["win_loss"])
+            results_by_spot[key].append(g.player_result)
+        per_game_loss.append(loss)
+        for p in PHASES:
+            phase_loss[p].append(ph[p])
+        if first:
+            first_error_moves.append(first)
+        curve = a.get("eval_curve") or []
+        for move_no in range(0, 31):
+            idx = 2 * move_no
+            if idx < len(curve):
+                curves[move_no].append(pov(curve[idx], color))
+
+    n = len(anns)
+    min_games = 2 if n >= 3 else 1
+    repeated = sorted((sp for sp in spots.values() if len(sp["games"]) >= min_games),
+                      key=lambda sp: (-len(sp["games"]), -sum(sp["win_loss"])))
+    singles = sorted((sp for sp in spots.values() if len(sp["games"]) < min_games),
+                     key=lambda sp: -sum(sp["win_loss"]))
+    # repeated positions first; if the player rarely reaches the same position twice, the costliest
+    # single positions still show where the line goes wrong
+    ranked = repeated[:3] + singles[: max(0, 3 - len(repeated))]
+    n_errors = sum(len(sp["win_loss"]) for sp in spots.values())
+    trouble = []
+    for sp in ranked:
+        best_san = sp["best"].most_common(1)[0][0] if sp["best"] else None
+        trouble.append({
+            "repeated": len(sp["games"]) >= min_games and n >= 3,
+            "fen": sp["fen"],
+            "move": (sp["ply"] + 1) // 2,
+            "ply": sp["ply"],
+            "phase": sp["phase"],
+            "games": len(sp["games"]),
+            "tried": [{"san": san, "uci": sp["tried_uci"][san], "games": c} for san, c in sp["tried"].most_common(4)],
+            "best_san": best_san,
+            "best": sp["best_uci"].get(best_san) if best_san else None,
+            "avg_win_loss": round(sum(sp["win_loss"]) / len(sp["win_loss"]), 1),
+            "example_game_id": sp["example"][0],
+            "example_ply": sp["example"][1],
+            "results": dict(Counter(results_by_spot[_fen_key(sp["fen"])])),
+        })
+        if len(trouble) >= 3:
+            break
+
+    curve_out = []
+    for move_no in sorted(curves):
+        vals = curves[move_no]
+        if len(vals) >= max(1, n // 3):
+            curve_out.append({"move": move_no, "avg_eval": round(sum(vals) / len(vals)), "n": len(vals)})
+    enough = max(min_games, (n + 1) // 2)
+    turning = next((c["move"] for c in curve_out if c["move"] > 0 and c["avg_eval"] <= -60 and c["n"] >= enough), None)
+    worst_drop = None
+    for prev, cur in zip(curve_out, curve_out[1:]):
+        drop = prev["avg_eval"] - cur["avg_eval"]
+        if cur["n"] >= enough and (worst_drop is None or drop > worst_drop[1]):
+            worst_drop = (cur["move"], drop)
+
+    avg_loss = sum(per_game_loss) / n
+    phase_avg = {p: round(sum(v) / n, 1) for p, v in phase_loss.items()}
+    avg_first = round(sum(first_error_moves) / len(first_error_moves)) if first_error_moves else None
+
+    errors_per_game = n_errors / n
+    avg_per_error = (sum(per_game_loss) / n_errors) if n_errors else 0.0
+    # one plain sentence a coach would say
+    worst_phase = max(phase_avg, key=phase_avg.get)
+    if n_errors:
+        parts = [f"Across {n} analysed game{'s' if n != 1 else ''} you make about {errors_per_game:.1f} engine-flagged "
+                 f"errors per game in this line, each costing {avg_per_error:.0f}% win chance on average, "
+                 f"mostly in the {worst_phase}."]
+    else:
+        parts = [f"Across {n} analysed game{'s' if n != 1 else ''} the engine found nothing to complain about in this line."]
+    if avg_first:
+        parts.append(f"On average the first slip comes at move {avg_first}.")
+    if turning:
+        parts.append(f"The evaluation typically turns against you around move {turning}.")
+    elif worst_drop and worst_drop[1] >= 40:
+        parts.append(f"The sharpest average drop happens at move {worst_drop[0]}.")
+    if trouble:
+        t = trouble[0]
+        tried = ", ".join(f"{x['san']} ({x['games']})" for x in t["tried"])
+        if t["repeated"]:
+            parts.append(f"Biggest trouble spot: the position before move {t['move']}, reached in {t['games']} games, "
+                         f"where you played {tried}" + (f"; the engine prefers {t['best_san']}." if t["best_san"] else "."))
+        else:
+            parts.append(f"You rarely reach the same position twice in this line; the costliest single moment was "
+                         f"before move {t['move']}, where you played {t['tried'][0]['san']}"
+                         + (f" instead of {t['best_san']}." if t["best_san"] else "."))
+    return {
+        "analyzed": n,
+        "win_loss_per_game": round(avg_loss, 1),
+        "errors_per_game": round(errors_per_game, 1),
+        "avg_loss_per_error": round(avg_per_error, 1),
+        "win_loss_by_phase": phase_avg,
+        "avg_first_error_move": avg_first,
+        "turning_move": turning,
+        "worst_drop_move": worst_drop[0] if worst_drop and worst_drop[1] >= 40 else None,
+        "eval_curve": curve_out,
+        "trouble_spots": trouble,
+        "summary": " ".join(parts),
+    }
+
+
+def opening_name_for(g: ParsedGame, ann: dict | None) -> tuple[str, str]:
+    """chess.com's label when it has one (it knows deep lines), otherwise our book's name."""
+    bk = (ann or {}).get("book") or {}
+    name = g.opening_name or bk.get("name") or "Unknown"
+    family = g.opening_family or (bk.get("name") or "Unknown").split(":")[0].strip()
+    return name, family
+
+
+def openings_section(games: list[ParsedGame], analyzed_by_id: dict[str, dict], all_annotations: dict[str, dict]) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for color in ("white", "black"):
         col_games = [g for g in games if g.player_color == color and g.rules == "chess"]
         by_name: dict[str, list[ParsedGame]] = defaultdict(list)
         by_family: dict[str, list[ParsedGame]] = defaultdict(list)
         for g in col_games:
-            by_name[g.opening_name or "Unknown"].append(g)
-            by_family[g.opening_family or "Unknown"].append(g)
+            name, family = opening_name_for(g, all_annotations.get(g.id))
+            by_name[name].append(g)
+            by_family[family].append(g)
 
         def summarize(name: str, gs: list[ParsedGame]) -> dict[str, Any]:
             e = {"name": name, **_wdl(gs), "eco": Counter(g.eco for g in gs if g.eco).most_common(1)[0][0] if any(g.eco for g in gs) else None}
@@ -340,6 +513,28 @@ def openings_section(games: list[ParsedGame], analyzed_by_id: dict[str, dict]) -
             )
             e["last_played"] = max(g.end_time for g in gs)
             e["example_ids"] = [g.id for g in sorted(gs, key=lambda g: -g.end_time)[:3]]
+            # who leaves the book first, and the player's typical first mistake
+            left = Counter()
+            first_errors: Counter = Counter()
+            first_error_detail: dict[tuple[int, str], dict] = {}
+            for g in gs:
+                a = all_annotations.get(g.id) or {}
+                bk = a.get("book") or {}
+                if bk.get("deviation_ply"):
+                    left[bk["deviated_by"]] += 1
+                fe = a.get("first_error")
+                if fe:
+                    key = (fe["ply"], fe["san"])
+                    first_errors[key] += 1
+                    first_error_detail[key] = fe
+            e["deep_dive"] = opening_deep_dive(gs, analyzed_by_id, color)
+            e["left_book_first"] = {"player": left["player"], "opponent": left["opponent"]}
+            e["typical_mistakes"] = [
+                {"ply": k[0], "san": k[1], "games": n, "best_san": first_error_detail[k].get("best_san"),
+                 "class": first_error_detail[k].get("class"), "fen": first_error_detail[k].get("fen"),
+                 "uci": first_error_detail[k].get("uci"), "best": first_error_detail[k].get("best")}
+                for k, n in first_errors.most_common(3) if n >= 2 or len(gs) < 4
+            ]
             return e
 
         names = sorted((summarize(n, gs) for n, gs in by_name.items()), key=lambda e: -e["games"])
@@ -350,12 +545,42 @@ def openings_section(games: list[ParsedGame], analyzed_by_id: dict[str, dict]) -
         min_games = 2 if len(col_games) >= 20 else 1
         tree = _tree_finalize(root, min_games)
         tree["games"] = len(col_games)
+        # the player's most common departures from the book, with how those games went
+        dev: dict[tuple[int, str], list[ParsedGame]] = defaultdict(list)
+        dev_book: dict[tuple[int, str], list[str]] = {}
+        dev_pos: dict[tuple[int, str], dict[str, Any]] = {}
+        left_first = Counter()
+        for g in col_games:
+            bk = (all_annotations.get(g.id) or {}).get("book") or {}
+            if bk.get("deviation_ply"):
+                left_first[bk["deviated_by"]] += 1
+                if bk["deviated_by"] == "player":
+                    key = (bk["deviation_ply"], bk["played"])
+                    dev[key].append(g)
+                    dev_book[key] = bk["book_moves"]
+                    if key not in dev_pos:
+                        mv = g.moves[bk["deviation_ply"] - 1]
+                        board = chess.Board(mv.fen_before)
+                        ucis = []
+                        for san in bk["book_moves"][:4]:
+                            try:
+                                ucis.append(board.parse_san(san).uci())
+                            except ValueError:
+                                pass
+                        dev_pos[key] = {"fen": mv.fen_before, "uci": mv.uci, "book_ucis": ucis}
+        deviations = sorted(
+            ({"ply": k[0], "san": k[1], "book_moves": dev_book[k][:4], **dev_pos[k], **_wdl(v)} for k, v in dev.items()),
+            key=lambda d: -d["games"],
+        )
         out[color] = {
             "games": len(col_games),
             "openings": names[:40],
             "families": families[:20],
             "tree": tree,
             "distinct_openings": len(by_name),
+            "left_book_first": {"player": left_first["player"], "opponent": left_first["opponent"],
+                                "neither": len(col_games) - left_first["player"] - left_first["opponent"]},
+            "deviations": deviations[:10],
         }
     return out
 
@@ -372,9 +597,11 @@ def time_section(games: list[ParsedGame], analyzed: list[tuple[ParsedGame, dict]
         tt_games = 0
         tt_losses = 0
         avg_left_at_end = []
+        premoves = 0
         for g in gs:
             ann = all_annotations[g.id]
             me = _player_moves(ann)
+            premoves += sum(1 for m in me if m.get("premove"))
             for ph in PHASES:
                 spent = [m["time_spent"] for m in me if m["phase"] == ph and m["time_spent"] is not None]
                 if spent:
@@ -401,6 +628,8 @@ def time_section(games: list[ParsedGame], analyzed: list[tuple[ParsedGame, dict]
             "timeouts": timeouts,
             "won_on_time": won_on_time,
             "avg_clock_left_at_end": _mean(avg_left_at_end),
+            "premoves": premoves,
+            "premoves_per_game": round(premoves / len(gs), 1) if gs else None,
         }
 
     # blunder rate in time trouble vs normal (needs engine)
@@ -419,6 +648,8 @@ def time_section(games: list[ParsedGame], analyzed: list[tuple[ParsedGame, dict]
                     norm_moves += 1
                     norm_bl += m["class"] in ("blunder", "mistake")
             ts = m["time_spent"]
+            if m.get("premove"):
+                continue
             if ts is not None and m["ply"] > 10 and g.base_seconds and g.base_seconds >= 180:
                 key = "<2s" if ts < 2 else "2-5s" if ts < 5 else "5-15s" if ts < 15 else "15-30s" if ts < 30 else "30s+"
                 speed_buckets[key].append(m["cp_loss"])
@@ -466,7 +697,9 @@ def tactics_section(analyzed: list[tuple[ParsedGame, dict]]) -> dict[str, Any]:
                 if len(examples[t]) < 4:
                     examples[t].append({"game_id": g.id, "ply": m["ply"], "san": m["san"], "best_san": m.get("best_san"),
                                         "win_loss": m.get("win_loss"), "opponent": g.opponent, "date": g.end_time,
-                                        "fen_before": moves[i - 1]["fen"] if i else None})
+                                        "fen": moves[i - 1]["fen"] if i else ann.get("start_fen"),
+                                        "uci": m["uci"], "best": m.get("best"), "side": g.player_color,
+                                        "class": m.get("class")})
                 if t == "hung_piece":
                     # which piece got lost? look at the opponent's capture
                     nxt = moves[i + 1] if i + 1 < len(moves) else None
@@ -546,41 +779,59 @@ def endgames_section(games: list[ParsedGame], analyzed: list[tuple[ParsedGame, d
     }
 
 
+def puzzle_candidates(g: ParsedGame, ann: dict[str, Any]) -> list[dict[str, Any]]:
+    """Player mistakes/blunders that could become puzzles (before MultiPV verification)."""
+    out = []
+    moves = ann["moves"]
+    for i, m in enumerate(moves):
+        if m["color"] != g.player_color or m.get("class") not in ("blunder", "mistake"):
+            continue
+        if not m.get("best") or m.get("win_loss", 0) < 15:
+            continue
+        fen_before = moves[i - 1]["fen"] if i else ann.get("start_fen")
+        if fen_before is None:
+            continue
+        tags = [t for t in m.get("tags", []) if t not in PHASES]
+        theme = next((t for t in ("missed_mate", "missed_material", "hung_piece", "allowed_mate", "walked_into_fork",
+                                  "bad_trade", "lost_material", "threw_away_win", "collapsed") if t in tags), "improve")
+        out.append({
+            "game_id": g.id,
+            "ply": m["ply"],
+            "fen": fen_before,
+            "side": g.player_color,
+            "played": m["san"],
+            "played_uci": m["uci"],
+            "best": m["best"],
+            "best_san": m.get("best_san"),
+            "pv": m.get("pv", []),
+            "win_loss": m["win_loss"],
+            "theme": theme,
+            "theme_label": TAG_LABELS.get(theme, "Find the better move"),
+            "opponent": g.opponent,
+            "date": g.end_time,
+            "eval_before": m.get("eval_before"),
+            "accepted": [a["uci"] for a in m.get("alternatives", [])] or [m["best"]],
+            "accepted_san": [a["san"] for a in m.get("alternatives", [])] or [m.get("best_san") or m["best"]],
+            "only_move": bool(m.get("only_move")),
+            "verified": "alternatives" in m,
+            "played_is_fine": bool(m.get("played_is_fine")),
+        })
+    return out
+
+
 def puzzles_section(analyzed: list[tuple[ParsedGame, dict]], limit: int = 40) -> list[dict[str, Any]]:
-    """Positions from the player's own games where they missed a clearly better move."""
+    """Positions from the player's own games where they missed a clearly better move.
+
+    Verified positions where MultiPV showed the played move was actually fine are dropped, and
+    positions with more than three acceptable answers are considered too vague to be puzzles."""
     cands = []
     for g, ann in analyzed:
-        moves = ann["moves"]
-        for i, m in enumerate(moves):
-            if m["color"] != g.player_color or m.get("class") not in ("blunder", "mistake"):
+        for c in puzzle_candidates(g, ann):
+            if c["played_is_fine"] or len(c["accepted"]) > 3:
                 continue
-            if not m.get("best") or m.get("win_loss", 0) < 15:
-                continue
-            tags = [t for t in m.get("tags", []) if t not in PHASES]
-            # prefer concrete tactical themes
-            theme = next((t for t in ("missed_mate", "missed_material", "hung_piece", "allowed_mate", "walked_into_fork",
-                                      "bad_trade", "lost_material", "threw_away_win", "collapsed") if t in tags), "improve")
-            fen_before = moves[i - 1]["fen"] if i else None
-            if fen_before is None:
-                continue
-            cands.append({
-                "game_id": g.id,
-                "ply": m["ply"],
-                "fen": fen_before,
-                "side": g.player_color,
-                "played": m["san"],
-                "best": m["best"],
-                "best_san": m.get("best_san"),
-                "pv": m.get("pv", []),
-                "win_loss": m["win_loss"],
-                "theme": theme,
-                "theme_label": TAG_LABELS.get(theme, "Find the better move"),
-                "opponent": g.opponent,
-                "date": g.end_time,
-                "eval_before": m.get("eval_before"),
-            })
+            cands.append(c)
     priority = {"missed_mate": 0, "missed_material": 1, "hung_piece": 2, "allowed_mate": 3, "walked_into_fork": 4}
-    cands.sort(key=lambda c: (priority.get(c["theme"], 5), -c["win_loss"]))
+    cands.sort(key=lambda c: (priority.get(c["theme"], 5), not c["only_move"], -c["win_loss"]))
     # keep at most 2 per game so the set is varied
     per_game: Counter = Counter()
     out = []
@@ -603,6 +854,7 @@ def games_list(games: list[ParsedGame], all_annotations: dict[str, dict]) -> lis
             "id": g.id,
             "url": g.url,
             "date": g.end_time,
+            "start": g.start_time,
             "time_class": g.time_class,
             "time_control": g.time_control,
             "rated": g.rated,
@@ -633,6 +885,7 @@ def build_report(
     games: list[ParsedGame],
     annotations: dict[str, dict[str, Any]],
     options: dict[str, Any],
+    previous: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     games = [g for g in games if g.moves]
     analyzed = [(g, annotations[g.id]) for g in games if g.id in annotations and annotations[g.id].get("engine")]
@@ -655,13 +908,32 @@ def build_report(
         "ratings": ratings_section(games),
         "results": results_section(games),
         "accuracy": accuracy_section(analyzed),
-        "openings": openings_section(games, analyzed_by_id),
+        "openings": openings_section(games, analyzed_by_id, annotations),
         "time": time_section(games, analyzed, annotations),
         "tactics": tactics_section(analyzed),
         "endgames": endgames_section(games, analyzed, annotations),
         "puzzles": puzzles_section(analyzed),
         "games": games_list(games, annotations),
     }
+    report["overview"]["unknown_result_codes"] = sum(1 for g in games if not g.result_known)
     report["insights"] = build_insights(report)
     report["training_plan"] = build_training_plan(report["insights"])
+    report["previous"] = previous
     return report
+
+
+def report_summary(report: dict[str, Any]) -> dict[str, Any]:
+    """The few numbers worth keeping per run, so the next report can show what changed."""
+    ov, acc = report["overview"], report["accuracy"]
+    return {
+        "generated_at": report["generated_at"],
+        "games_total": ov["games_total"],
+        "games_analyzed": ov["games_analyzed"],
+        "score": ov["all"]["score"],
+        "ratings": {tc: e["rating_now"] for tc, e in ov["by_time_class"].items()},
+        "accuracy": acc["overall"]["accuracy"] if acc.get("available") else None,
+        "acpl": acc["overall"]["acpl"] if acc.get("available") else None,
+        "blunders_per_game": acc["overall"]["blunders_per_game"] if acc.get("available") else None,
+        "conversion_pct": acc["winning_positions"]["conversion_pct"] if acc.get("available") else None,
+        "top_insights": [i["id"] for i in report["insights"][:5]],
+    }

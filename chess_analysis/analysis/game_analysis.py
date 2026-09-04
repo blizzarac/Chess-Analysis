@@ -6,11 +6,19 @@ from typing import Any
 import chess
 
 from ..pgn_parse import ParsedGame
+from . import book
 from .eval_utils import MATE_CP, classify, clamp_cp, format_eval, game_accuracy, move_accuracy, pov, win_pct
 
 PIECE_VALUES = {chess.PAWN: 1, chess.KNIGHT: 3, chess.BISHOP: 3, chess.ROOK: 5, chess.QUEEN: 9, chess.KING: 0}
-OPENING_MAX_PLY = 20          # moves 1-10 count as the opening (unless the endgame arrives first)
+OPENING_MIN_PLY = 12          # the opening never ends before move 6...
+OPENING_MAX_PLY = 30          # ...and never lasts beyond move 15
+OPENING_UNDEVELOPED_LIMIT = 2 # it ends once at most two minor pieces (both sides) are still at home
 ENDGAME_PIECE_LIMIT = 6       # endgame when at most 6 non-pawn, non-king pieces remain in total
+PREMOVE_SECONDS = 0.3         # a move played this fast was almost certainly a premove
+ALTERNATIVE_WIN_MARGIN = 5.0  # alternatives within this many win% of the best move count as correct
+ONLY_MOVE_GAP = 10.0          # an "only move" is this much better than the second-best one
+MINOR_HOME = {chess.WHITE: {chess.B1: chess.KNIGHT, chess.G1: chess.KNIGHT, chess.C1: chess.BISHOP, chess.F1: chess.BISHOP},
+              chess.BLACK: {chess.B8: chess.KNIGHT, chess.G8: chess.KNIGHT, chess.C8: chess.BISHOP, chess.F8: chess.BISHOP}}
 TAG_LABELS = {
     "missed_mate": "Missed a forced mate",
     "allowed_mate": "Allowed a forced mate",
@@ -29,6 +37,25 @@ TAG_LABELS = {
     "endgame": "In the endgame",
     "premature_resign": "Resigned a defensible position",
 }
+
+
+def undeveloped_minors(board: chess.Board) -> int:
+    n = 0
+    for color, squares in MINOR_HOME.items():
+        for sq, pt in squares.items():
+            piece = board.piece_at(sq)
+            if piece is not None and piece.color == color and piece.piece_type == pt:
+                n += 1
+    return n
+
+
+def opening_over(board: chess.Board, ply: int) -> bool:
+    """The opening ends when development is (nearly) complete, bounded to moves 6-15."""
+    if ply <= OPENING_MIN_PLY:
+        return False
+    if ply > OPENING_MAX_PLY:
+        return True
+    return undeveloped_minors(board) <= OPENING_UNDEVELOPED_LIMIT
 
 
 def material(board: chess.Board, color: chess.Color) -> int:
@@ -105,8 +132,13 @@ def time_trouble_threshold(base: float | None, inc: float) -> float | None:
     return max(5.0, min(30.0, base * 0.10))
 
 
-def annotate(game: ParsedGame, evals: list[dict[str, Any]] | None) -> dict[str, Any]:
-    """Build the full per-game annotation. `evals` may be None (no engine): only clocks/phases."""
+def annotate(game: ParsedGame, evals: list[dict[str, Any]] | None,
+             multipv: dict[str, list[dict[str, Any]]] | None = None) -> dict[str, Any]:
+    """Build the full per-game annotation. `evals` may be None (no engine): only clocks/phases.
+
+    `multipv` maps a ply (as a string) to the engine's top moves for the position before that
+    ply; it is used to accept alternative solutions in puzzles and to flag only-moves."""
+    multipv = multipv or {}
     n = len(game.moves)
     have_engine = evals is not None and len(evals) >= 2
     board = chess.Board(chess960=(game.rules == "chess960"))
@@ -122,7 +154,7 @@ def annotate(game: ParsedGame, evals: list[dict[str, Any]] | None) -> dict[str, 
         if endgame_start is None and non_pawn_piece_count(board) <= ENDGAME_PIECE_LIMIT:
             endgame_start = mv.ply
             endgame_kind = endgame_type(board)
-        if middlegame_start is None and endgame_start is None and mv.ply > OPENING_MAX_PLY:
+        if middlegame_start is None and endgame_start is None and opening_over(board, mv.ply):
             middlegame_start = mv.ply
         if endgame_start is not None:
             phases.append("endgame")
@@ -131,10 +163,6 @@ def annotate(game: ParsedGame, evals: list[dict[str, Any]] | None) -> dict[str, 
         else:
             phases.append("opening")
         board.push_uci(mv.uci)
-    if endgame_start is None and non_pawn_piece_count(board) <= ENDGAME_PIECE_LIMIT and n:
-        # endgame reached only on the final position
-        pass
-
     # --- clocks -------------------------------------------------------------------------------
     base, inc = game.base_seconds, game.increment_seconds
     tt_threshold = time_trouble_threshold(base, inc)
@@ -165,6 +193,7 @@ def annotate(game: ParsedGame, evals: list[dict[str, Any]] | None) -> dict[str, 
             "clock": mv.clock,
             "time_spent": None if time_spent[i] is None else round(time_spent[i], 1),
             "phase": phases[i],
+            "premove": time_spent[i] is not None and time_spent[i] < PREMOVE_SECONDS,
             "piece": mv.piece,
             "capture": mv.is_capture,
             "check": mv.is_check,
@@ -248,7 +277,8 @@ def annotate(game: ParsedGame, evals: list[dict[str, Any]] | None) -> dict[str, 
                     tags.append("collapsed")
                 if tt_threshold is not None and mv.clock is not None and mv.clock < tt_threshold:
                     tags.append("time_trouble")
-                elif time_spent[i] is not None and base and base >= 180 and time_spent[i] < 2.0 and cls in ("mistake", "blunder"):
+                elif (time_spent[i] is not None and base and base >= 180 and PREMOVE_SECONDS <= time_spent[i] < 2.0
+                      and cls in ("mistake", "blunder")):
                     tags.append("rushed")
                 if (
                     prev_move is not None
@@ -259,6 +289,24 @@ def annotate(game: ParsedGame, evals: list[dict[str, Any]] | None) -> dict[str, 
                     tags.append("missed_opponent_blunder")
                 tags.append(phases[i])
             entry["tags"] = tags
+            # ---- MultiPV verification (puzzle candidates only) -------------------------------
+            alts = multipv.get(str(mv.ply))
+            if alts:
+                mover = chess.WHITE if mv.color == "white" else chess.BLACK
+                ranked = []
+                for alt in alts:
+                    try:
+                        alt_san = board.san(chess.Move.from_uci(alt["uci"]))
+                    except (ValueError, AssertionError):
+                        continue
+                    ranked.append({"uci": alt["uci"], "san": alt_san, "win": round(win_pct(pov(alt["cp"], mv.color)), 1)})
+                if ranked:
+                    top = ranked[0]["win"]
+                    accepted = [a for a in ranked if a["win"] >= top - ALTERNATIVE_WIN_MARGIN]
+                    entry["alternatives"] = accepted
+                    entry["only_move"] = len(ranked) > 1 and (top - ranked[1]["win"]) >= ONLY_MOVE_GAP
+                    played_alt = next((a for a in ranked if a["uci"] == mv.uci), None)
+                    entry["played_is_fine"] = played_alt is not None and played_alt["win"] >= top - ALTERNATIVE_WIN_MARGIN
         board.push_uci(mv.uci)
         prev_move = entry
         if mv.color == game.player_color:
@@ -280,7 +328,21 @@ def annotate(game: ParsedGame, evals: list[dict[str, Any]] | None) -> dict[str, 
         "plies": n,
         "has_clocks": any(m.clock is not None for m in game.moves),
         "time_trouble_threshold": tt_threshold,
+        "start_fen": game.moves[0].fen_before if game.moves else chess.STARTING_FEN,
+        "book": book.lookup([m.san for m in game.moves], game.player_color) if game.rules == "chess" else None,
     }
+    # first time the player went wrong in the opening (for the per-opening "typical mistake" stat)
+    result["first_error"] = None
+    if have_engine:
+        for idx, m in enumerate(moves_out):
+            if m["color"] == game.player_color and m.get("class") in ("inaccuracy", "mistake", "blunder"):
+                if m["phase"] != "opening":
+                    break
+                result["first_error"] = {"ply": m["ply"], "san": m["san"], "best_san": m.get("best_san"),
+                                         "class": m["class"], "win_loss": m.get("win_loss"),
+                                         "fen": moves_out[idx - 1]["fen"] if idx else result["start_fen"],
+                                         "uci": m["uci"], "best": m.get("best")}
+                break
     for color in ("white", "black"):
         col_moves = [m for m in moves_out if m["color"] == color]
         summary: dict[str, Any] = {"moves": len(col_moves)}
@@ -306,7 +368,7 @@ def annotate(game: ParsedGame, evals: list[dict[str, Any]] | None) -> dict[str, 
     if have_engine:
         result["eval_curve"] = [clamp_cp(e["cp"]) for e in evals[: n + 1]]
         # eval at move 10 / endgame start, useful for opening & endgame aggregates
-        idx10 = min(OPENING_MAX_PLY, n)
+        idx10 = min(20, n)
         result["eval_after_opening"] = clamp_cp(evals[idx10]["cp"]) if idx10 < len(evals) else None
         if endgame_start is not None and endgame_start - 1 < len(evals):
             result["eval_at_endgame"] = clamp_cp(evals[endgame_start - 1]["cp"])
@@ -318,7 +380,9 @@ def annotate(game: ParsedGame, evals: list[dict[str, Any]] | None) -> dict[str, 
             key=lambda m: -m["win_loss"],
         )
         result["critical_moments"] = [
-            {"ply": m["ply"], "san": m["san"], "color": m["color"], "win_loss": m["win_loss"], "class": m["class"]}
+            {"ply": m["ply"], "san": m["san"], "color": m["color"], "win_loss": m["win_loss"], "class": m["class"],
+             "uci": m["uci"], "best": m.get("best"), "best_san": m.get("best_san"),
+             "fen": moves_out[m["ply"] - 2]["fen"] if m["ply"] > 1 else result["start_fen"]}
             for m in swings[:5]
         ]
         # premature resignation: resigned while eval was still >= -1.5 for the player

@@ -10,8 +10,9 @@ It answers the questions a coach would ask after looking at your games:
 - **How accurate are you, and when?** Engine-graded moves (best / excellent / good / inaccuracy /
   mistake / blunder), accuracy and centipawn loss per phase, per colour, per time class, per move
   number and over time. Conversion of winning positions and saves of lost ones.
-- **What do you play?** Every opening with score, accuracy and the engine's verdict after ten
-  moves, plus a repertoire map of your first five moves as White and as Black.
+- **What do you play?** Every opening with score, accuracy, the engine's verdict after ten
+  moves and the move where you typically first go wrong, a repertoire map of your first five
+  moves, and where you leave a compact book of standard lines (and how those games went).
 - **Why were the bad moves bad?** Each mistake is checked on the board: hung a piece, missed a
   mate, walked into a fork, threw away a win, rushed, in time trouble, missed the opponent's blunder.
 - **Where does the clock go?** Time per phase, time-trouble error rate, move quality by thinking
@@ -19,10 +20,53 @@ It answers the questions a coach would ask after looking at your games:
 - **Endgames:** which types you reach, how often you convert winning ones and hold level ones.
 - **Insights & training plan:** ranked findings with a recommendation each, and a four-point plan
   with drills.
-- **Puzzles from your own games:** positions where you missed a clearly better move, solvable on
-  the board.
+- **Puzzles from your own games:** positions where you missed a clearly better move, verified
+  with a second three-line engine pass so that equally good alternatives are accepted and vague
+  positions are dropped. Solved and failed positions are scheduled with spaced repetition.
+- **Progress:** each report is snapshotted; the next one shows what moved (score, accuracy,
+  blunders, conversion, ratings).
 - **Game viewer:** board, evaluation bar and graph, move list with classifications, the better move
   drawn as an arrow, critical moments.
+- **No notation needed:** every finding that mentions a move comes with a small board (red arrow
+  for what you played, green for the engine's move, blue for other acceptable moves) and a plain
+  description such as "knight from f6 to d5" or "bishop takes the knight on e5".
+
+## Public deployment (Docker, one server)
+
+The site is designed to be run for many visitors: reports are shared per chess.com username,
+analysis runs in a queue handled by a separate worker container, visitors are rate-limited and
+capped, and accounts (email sign-in, no password) raise the caps and keep saved players and
+puzzle progress.
+
+```bash
+cp .env.example .env         # set DOMAIN, BASE_URL, SMTP_*, ADMIN_EMAILS, CONTACT_EMAIL
+docker compose up -d --build
+```
+
+That starts three containers: `caddy` (TLS certificates and reverse proxy on ports 80/443),
+`web` (the site and API) and `worker` (downloads and Stockfish). The SQLite database lives on
+the `data` volume; back it up with `docker compose cp web:/data ./backup`.
+
+How it behaves in production:
+
+- **Queue.** Every analysis is a row in the `jobs` table. The worker claims jobs in priority
+  order (admins, then signed-in users, then visitors), writes progress back, and re-queues jobs
+  whose worker died. A second request for a player already being analysed joins that job.
+- **Limits.** Visitors get `ANON_*` caps (default 30 games, depth 12, 12 months, 5 analyses a
+  day per IP); signed-in users get `USER_*` caps. Requests per IP are limited by
+  `IP_REQUESTS_PER_MINUTE`. chess.com calls are spaced by `CHESSCOM_MIN_INTERVAL` site-wide.
+- **Accounts.** Sign-in links are sent by SMTP (`SMTP_*`). Tokens are single-use, hashed at
+  rest and expire in 15 minutes; sessions are HttpOnly cookies valid for 30 days. Emails listed
+  in `ADMIN_EMAILS` get admin caps plus `GET /api/admin/jobs` and
+  `DELETE /api/admin/players/{username}` for data-removal requests.
+- **Privacy.** There is no public list of analysed players. The footer shows `CONTACT_EMAIL`
+  for removal requests.
+- **Scaling.** One server handles the web process plus one worker with `ENGINE_WORKERS`
+  Stockfish processes. To go further, move the database to Postgres and run more workers.
+
+Without Docker, run the two processes yourself: `python -m chess_analysis` (set
+`INLINE_WORKER=0`) and `python -m chess_analysis.worker`. With `INLINE_WORKER=1` (the default)
+the web process runs the worker itself, which is fine for a single user.
 
 ## Requirements
 
@@ -50,6 +94,15 @@ Environment variables:
 | `PORT` / `HOST` | 8000 / 127.0.0.1 | Server bind address |
 | `CHESSCOM_USER_AGENT` | project string | chess.com asks for an identifying User-Agent |
 | `CHESSCOM_MOCK_DIR` | unset | Serve chess.com responses from JSON files (offline demo / tests) |
+| `INLINE_WORKER` | 1 | Run the job worker inside the web process (0 when a worker container exists) |
+| `BASE_URL` | http://127.0.0.1:8000 | Public URL, used in sign-in links |
+| `AUTH_DEV_LINKS` | 0 | Return sign-in links in the API response instead of emailing (development only) |
+| `SMTP_HOST` … | unset | Mail server for sign-in links; see `.env.example` |
+| `ADMIN_EMAILS` | unset | Comma-separated admin accounts |
+| `CONTACT_EMAIL` | unset | Shown in the footer for questions and removal requests |
+| `TRUST_PROXY` | 0 | Read the client IP from X-Forwarded-For (behind Caddy/nginx) |
+| `COOKIE_SECURE` | 0 | Mark the session cookie Secure (set behind HTTPS) |
+| `ANON_*`, `USER_*` | see `.env.example` | Caps and daily quotas per visitor tier |
 
 Enter a username, optionally open **Options** (engine depth, how many recent games get engine
 analysis, which time classes, how many months of history) and press **Analyze**. Downloads and
@@ -82,12 +135,18 @@ python -m pytest -q
   the arithmetic and harmonic means of the move accuracies.
 - **Classification** is by win probability lost: best (engine's move or ≤0.5%), excellent (<2%),
   good (<5%), inaccuracy (<10%), mistake (<20%), blunder (≥20%).
-- **Phases:** the opening is moves 1–10, the endgame starts when six or fewer pieces other than
-  kings and pawns remain, the middlegame is in between.
+- **Phases:** the opening ends once at most two minor pieces are still on their home squares
+  (never before move 6, never after move 15); the endgame starts when six or fewer pieces other
+  than kings and pawns remain; the middlegame is in between.
+- **Premoves:** moves played in under 0.3 seconds are counted as premoves and excluded from the
+  "rushed" tag and the thinking-time statistics.
+- **Opening book:** about 200 named lines (`chess_analysis/analysis/book.py`). chess.com's own
+  label is used when present; the book supplies the name otherwise and detects the first
+  departure from theory and who made it.
 - **Time trouble:** under 10% of the starting clock (5% with an increment ≥5s), at least 5 seconds.
 - **Tactical tags** replay the engine's principal variation on the board to see whether material
   is lost, a mate is missed or allowed, or the opponent's reply forks two pieces.
-- **Tilt:** games starting within 20 minutes of a loss versus all other games.
+- **Tilt:** games starting (per the PGN start time) within 20 minutes of a loss versus all others.
 
 Every insight requires a minimum sample (usually 8+ games or 60+ moves) before it is shown.
 
@@ -99,13 +158,17 @@ chess_analysis/
   db.py              SQLite cache for games, engine results and reports
   pgn_parse.py       PGN + clock parsing into a flat game record
   engine.py          Stockfish worker pool
-  jobs.py            download → analyse → report pipeline with progress
+  jobs.py            persistent job queue and the download → analyse → report pipeline
+  worker.py          worker process that claims and runs jobs
+  auth.py            magic-link accounts and sessions
+  limits.py          rate limiting
   main.py            FastAPI app and JSON API
   analysis/
     eval_utils.py    win%, accuracy, classification
     game_analysis.py per-game annotation: classes, phases, clocks, tactical tags
     report.py        aggregation into the report sections
     insights.py      findings and the training plan
+    book.py          compact opening book (names, ECO, first deviation)
 static/              single-page frontend (no build step, no framework)
 tests/               pytest suite and the offline fixture generator
 ```
@@ -118,6 +181,8 @@ tests/               pytest suite and the offline fixture generator
 | `GET /api/jobs/{id}` | Job status and progress |
 | `POST /api/jobs/{id}/cancel` | Cancel a running job |
 | `GET /api/report/{username}` | Latest report |
+| `GET /api/players/{username}/games` | Paginated, filterable game list (`offset`, `limit`, `time_class`, `result`, `color`, `analyzed`, `q`) |
+| `GET /api/players/{username}/history` | Snapshots of previous reports |
 | `GET /api/games/{username}/{game_id}` | Full annotation for the game viewer |
 | `GET /api/players` | Players with cached reports |
 | `GET /api/status` | Engine availability and defaults |

@@ -16,8 +16,17 @@ def _ins(id_: str, category: str, severity: str, title: str, detail: str, recomm
             "recommendation": recommendation, "impact": round(impact, 2), "evidence": evidence or {}}
 
 
+def _example(r: dict[str, Any], *tags: str) -> dict[str, Any] | None:
+    ex = (r.get("tactics") or {}).get("examples") or {}
+    for t in tags:
+        if ex.get(t):
+            return ex[t][0]
+    return None
+
+
 def build_insights(r: dict[str, Any]) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
+    _attach_examples_after = True
     ov, res, acc, op, tm, tac, eg = (r["overview"], r["results"], r["accuracy"], r["openings"], r["time"],
                                      r["tactics"], r["endgames"])
     total = ov["games_total"]
@@ -85,6 +94,28 @@ def build_insights(r: dict[str, Any]) -> list[dict[str, Any]]:
                 "Play it more often and study a few master games in it to add ideas beyond move 10.",
                 impact=1.5, evidence={"opening": o, "color": color},
             ))
+        # the opening where the most win chance evaporates, with the position it usually happens in
+        dives = [o for o in op[color]["openings"] if o.get("deep_dive") and o["deep_dive"]["analyzed"] >= 4 and o["games"] >= 5]
+        dives.sort(key=lambda o: -o["deep_dive"]["win_loss_per_game"])
+        if dives and dives[0]["deep_dive"]["win_loss_per_game"] >= 25:
+            o = dives[0]
+            d = o["deep_dive"]
+            ins = _ins(
+                f"opening_trouble_{color}_{o['name']}", "openings", "high" if d["win_loss_per_game"] >= 40 else "medium",
+                f"{o['name']} is your most error-prone opening as {color}",
+                d["summary"],
+                "Set the trouble position up on a board and work out the plan, then play through the engine's "
+                "preferred move and the next few moves until they feel natural. One position learned properly "
+                "fixes every game that reaches it.",
+                impact=3 + d["win_loss_per_game"] / 8 + o["games"] / 10,
+                evidence={"opening": o["name"], "color": color, "deep_dive": {k: v for k, v in d.items() if k != "eval_curve"}},
+            )
+            if d["trouble_spots"]:
+                t = d["trouble_spots"][0]
+                ins["example"] = {"fen": t["fen"], "tried": t["tried"], "best": t["best"], "best_san": t["best_san"],
+                                  "side": color, "ply": t["ply"], "game_id": t["example_game_id"],
+                                  "caption": f"Reached in {t['games']} game{'s' if t['games'] != 1 else ''}."}
+            out.append(ins)
         if op[color]["games"] >= 30 and op[color]["distinct_openings"] > op[color]["games"] * 0.6:
             out.append(_ins(
                 f"opening_scatter_{color}", "openings", "medium",
@@ -355,6 +386,40 @@ def build_insights(r: dict[str, Any]) -> list[dict[str, Any]]:
                 "Against lower-rated players play your normal, solid chess. Let them make the mistakes; they will.",
                 impact=3 + (62 - w) / 5, evidence=lower,
             ))
+    # a board to look at, wherever one exists
+    for ins in out:
+        if ins.get("example"):
+            continue
+        ex = None
+        cat, iid = ins["category"], ins["id"]
+        if iid == "hanging_pieces":
+            ex = _example(r, "hung_piece", "lost_material")
+        elif iid == "missed_tactics":
+            ex = _example(r, "missed_mate", "missed_material")
+        elif iid == "forks":
+            ex = _example(r, "walked_into_fork")
+        elif iid == "punish":
+            ex = _example(r, "missed_opponent_blunder")
+        elif iid in ("conversion", "endgame_conversion"):
+            ex = _example(r, "threw_away_win")
+        elif iid == "time_trouble_errors":
+            ex = _example(r, "time_trouble")
+        elif iid == "fast_moves":
+            ex = _example(r, "rushed")
+        elif iid == "blunders_in_losses":
+            ex = _example(r, "hung_piece", "allowed_mate", "collapsed")
+        elif iid.startswith("phase_"):
+            ex = ((r.get("accuracy") or {}).get("phase_examples") or {}).get(iid[len("phase_"):])
+        elif iid.startswith("opening_") and isinstance(ins["evidence"].get("opening"), dict):
+            tm = ins["evidence"]["opening"].get("typical_mistakes") or []
+            if tm and tm[0].get("fen"):
+                m = tm[0]
+                ex = {"fen": m["fen"], "uci": m["uci"], "best": m["best"], "san": m["san"], "best_san": m["best_san"],
+                      "side": ins["evidence"].get("color"), "ply": m["ply"], "game_id": None,
+                      "caption": f"Your usual first slip in this line, seen in {m['games']} game(s)"}
+        if ex:
+            ins["example"] = {k: ex.get(k) for k in ("fen", "uci", "best", "san", "best_san", "side", "ply", "game_id",
+                                                     "opponent", "date", "win_loss", "caption")}
     out.sort(key=lambda i: (-(i["severity"] != "positive"), -i["impact"]))
     return out
 

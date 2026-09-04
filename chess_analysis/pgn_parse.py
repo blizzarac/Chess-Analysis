@@ -2,13 +2,16 @@
 from __future__ import annotations
 
 import io
+import logging
 import re
+from datetime import datetime, timezone
 from dataclasses import dataclass, field, asdict
 from typing import Any
 
 import chess
 import chess.pgn
 
+log = logging.getLogger(__name__)
 CLOCK_RE = re.compile(r"\[%clk\s+(\d+):(\d{1,2}):(\d{1,2}(?:\.\d+)?)\]")
 HEADER_RE = re.compile(r'\[(\w+)\s+"([^"]*)"\]')
 
@@ -53,6 +56,7 @@ class ParsedGame:
     id: str
     url: str
     end_time: int
+    start_time: int | None
     time_class: str
     time_control: str
     base_seconds: float | None
@@ -69,6 +73,7 @@ class ParsedGame:
     player_result: str           # "win" | "draw" | "loss"
     player_result_code: str      # chess.com code for the player
     opponent_result_code: str
+    result_known: bool           # False when chess.com used a result code this parser doesn't know
     termination: str             # normalized how-the-game-ended text
     eco: str | None
     opening_name: str | None
@@ -147,6 +152,22 @@ def opening_from_url(eco_url: str | None) -> tuple[str | None, str | None]:
     return name, family
 
 
+def start_timestamp(headers: dict[str, str], end_time: int) -> int | None:
+    """chess.com PGNs carry UTCDate/StartTime (and EndDate/EndTime); combine them into an epoch."""
+    date = headers.get("UTCDate") or headers.get("Date")
+    start = headers.get("StartTime")
+    if not date or not start:
+        return None
+    try:
+        dt = datetime.strptime(f"{date} {start}", "%Y.%m.%d %H:%M:%S").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+    ts = int(dt.timestamp())
+    if ts > end_time + 60:  # start clock rolled over midnight relative to the end date
+        ts -= 86400
+    return ts if ts <= end_time else None
+
+
 def _normalize_termination(term: str | None, player_code: str, opp_code: str) -> str:
     code = player_code if player_code != "win" else opp_code
     return RESULT_LABELS.get(code, code or "unknown")
@@ -212,11 +233,17 @@ def parse_game(raw: dict[str, Any], username: str) -> ParsedGame | None:
     w_code = white.get("result", "")
     b_code = black.get("result", "")
     p_code, o_code = (w_code, b_code) if color == "white" else (b_code, w_code)
+    result_known = True
     if p_code in WIN_CODES:
         p_result = "win"
     elif p_code in DRAW_CODES:
         p_result = "draw"
+    elif p_code in LOSS_CODES:
+        p_result = "loss"
     else:
+        result_known = False
+        log.warning("unknown chess.com result code %r (opponent %r) in %s; counting as a loss",
+                    p_code, o_code, raw.get("url"))
         p_result = "loss"
 
     eco_url = headers.get("ECOUrl") or raw.get("eco")
@@ -229,6 +256,7 @@ def parse_game(raw: dict[str, Any], username: str) -> ParsedGame | None:
         id=raw.get("_id") or raw.get("uuid") or raw.get("url") or "",
         url=raw.get("url", ""),
         end_time=int(raw.get("end_time") or 0),
+        start_time=start_timestamp(headers, int(raw.get("end_time") or 0)),
         time_class=raw.get("time_class") or "unknown",
         time_control=raw.get("time_control") or "",
         base_seconds=base,
@@ -245,6 +273,7 @@ def parse_game(raw: dict[str, Any], username: str) -> ParsedGame | None:
         player_result=p_result,
         player_result_code=p_code,
         opponent_result_code=o_code,
+        result_known=result_known,
         termination=_normalize_termination(headers.get("Termination"), p_code, o_code),
         eco=headers.get("ECO"),
         opening_name=opening_name,

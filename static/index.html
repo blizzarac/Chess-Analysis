@@ -21,6 +21,7 @@
     <button type="submit" class="btn primary" id="analyze-btn">Analyze</button>
   </form>
   <div class="topbar-right">
+    <div id="account-area" class="account-area"></div>
     <button type="button" id="theme-toggle" class="btn ghost icon" title="Toggle light / dark">◐</button>
   </div>
 </header>
@@ -56,9 +57,11 @@
   <div class="opt">
     <label><input type="checkbox" id="refresh"> Re-download months already cached</label>
   </div>
+  <p id="caps-note" class="muted small" style="grid-column:1/-1;margin:0"></p>
 </section>
 
 <main id="app" class="app">
+  <section id="account-page" class="account-page" hidden></section>
   <section id="landing" class="landing">
     <div class="landing-copy">
       <h1>Every game you played, read back to you as a plan.</h1>
@@ -72,11 +75,7 @@
         <li><strong>Puzzles from your own games</strong>: the tactics you personally missed</li>
       </ul>
     </div>
-    <div class="landing-side">
-      <h2 class="eyebrow">Recent reports</h2>
-      <ul id="recent-players" class="recent-list"><li class="muted">None yet.</li></ul>
-      <p id="engine-status" class="muted small"></p>
-    </div>
+    <div class="landing-side" id="landing-side"></div>
   </section>
 
   <section id="progress" class="progress" hidden>
@@ -116,6 +115,26 @@
     <div class="content" id="content"></div>
   </section>
 </main>
+
+<footer class="site-foot">
+  <span>Built on public chess.com game data. Reports describe play, not people.</span>
+  <span id="foot-contact"></span>
+</footer>
+
+<div id="signin" class="viewer" hidden>
+  <div class="viewer-box signin-box" role="dialog" aria-modal="true" aria-labelledby="signin-title">
+    <div class="viewer-head"><h2 id="signin-title">Sign in</h2><button type="button" id="signin-close" class="btn ghost icon" aria-label="Close">✕</button></div>
+    <div class="viewer-body">
+      <form id="signin-form" autocomplete="on">
+        <p>No password. Enter your email and we send you a link that signs you in.</p>
+        <label class="sr-only" for="signin-email">Email</label>
+        <div class="analyze-form"><input id="signin-email" type="email" required placeholder="you@example.com" autocomplete="email"><button type="submit" class="btn primary">Send link</button></div>
+        <p id="signin-msg" class="small" style="margin-top:.8rem"></p>
+      </form>
+      <ul class="feature-list small" id="signin-perks"></ul>
+    </div>
+  </div>
+</div>
 
 <div id="viewer" class="viewer" hidden>
   <div class="viewer-box" role="dialog" aria-modal="true" aria-labelledby="viewer-title">
