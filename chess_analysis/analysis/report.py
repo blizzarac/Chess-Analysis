@@ -336,6 +336,151 @@ def _tree_finalize(node: dict[str, Any], min_games: int) -> dict[str, Any]:
     }
 
 
+def _fen_key(fen: str) -> str:
+    """Position identity without move counters, so transpositions at different move numbers match."""
+    return " ".join(fen.split()[:4])
+
+
+def opening_deep_dive(gs: list[ParsedGame], analyzed_by_id: dict[str, dict], color: str) -> dict[str, Any] | None:
+    """Everything that goes wrong for the player in one opening, across every game and every phase:
+    trouble spots grouped by position, the average evaluation by move, and win chance lost."""
+    anns = [(g, analyzed_by_id[g.id]) for g in gs if g.id in analyzed_by_id]
+    if not anns:
+        return None
+    spots: dict[str, dict[str, Any]] = {}
+    per_game_loss: list[float] = []
+    phase_loss: dict[str, list[float]] = {p: [] for p in PHASES}
+    curves: dict[int, list[int]] = defaultdict(list)
+    first_error_moves: list[int] = []
+    results_by_spot: dict[str, list[str]] = defaultdict(list)
+    for g, a in anns:
+        loss = 0.0
+        ph = {p: 0.0 for p in PHASES}
+        first: int | None = None
+        for i, m in enumerate(a["moves"]):
+            if m["color"] != color or "class" not in m:
+                continue
+            if m["class"] not in ("inaccuracy", "mistake", "blunder"):
+                continue
+            loss += m["win_loss"]
+            ph[m["phase"]] += m["win_loss"]
+            if first is None:
+                first = (m["ply"] + 1) // 2
+            fen_before = a["moves"][i - 1]["fen"] if i else a.get("start_fen")
+            if not fen_before:
+                continue
+            key = _fen_key(fen_before)
+            sp = spots.setdefault(key, {"fen": fen_before, "ply": m["ply"], "games": set(), "tried": Counter(),
+                                        "tried_uci": {}, "best": Counter(), "best_uci": {}, "win_loss": [],
+                                        "phase": m["phase"], "example": (g.id, m["ply"])})
+            sp["games"].add(g.id)
+            sp["tried"][m["san"]] += 1
+            sp["tried_uci"][m["san"]] = m["uci"]
+            if m.get("best_san") and m.get("best"):
+                sp["best"][m["best_san"]] += 1
+                sp["best_uci"][m["best_san"]] = m["best"]
+            sp["win_loss"].append(m["win_loss"])
+            results_by_spot[key].append(g.player_result)
+        per_game_loss.append(loss)
+        for p in PHASES:
+            phase_loss[p].append(ph[p])
+        if first:
+            first_error_moves.append(first)
+        curve = a.get("eval_curve") or []
+        for move_no in range(0, 31):
+            idx = 2 * move_no
+            if idx < len(curve):
+                curves[move_no].append(pov(curve[idx], color))
+
+    n = len(anns)
+    min_games = 2 if n >= 3 else 1
+    repeated = sorted((sp for sp in spots.values() if len(sp["games"]) >= min_games),
+                      key=lambda sp: (-len(sp["games"]), -sum(sp["win_loss"])))
+    singles = sorted((sp for sp in spots.values() if len(sp["games"]) < min_games),
+                     key=lambda sp: -sum(sp["win_loss"]))
+    # repeated positions first; if the player rarely reaches the same position twice, the costliest
+    # single positions still show where the line goes wrong
+    ranked = repeated[:3] + singles[: max(0, 3 - len(repeated))]
+    n_errors = sum(len(sp["win_loss"]) for sp in spots.values())
+    trouble = []
+    for sp in ranked:
+        best_san = sp["best"].most_common(1)[0][0] if sp["best"] else None
+        trouble.append({
+            "repeated": len(sp["games"]) >= min_games and n >= 3,
+            "fen": sp["fen"],
+            "move": (sp["ply"] + 1) // 2,
+            "ply": sp["ply"],
+            "phase": sp["phase"],
+            "games": len(sp["games"]),
+            "tried": [{"san": san, "uci": sp["tried_uci"][san], "games": c} for san, c in sp["tried"].most_common(4)],
+            "best_san": best_san,
+            "best": sp["best_uci"].get(best_san) if best_san else None,
+            "avg_win_loss": round(sum(sp["win_loss"]) / len(sp["win_loss"]), 1),
+            "example_game_id": sp["example"][0],
+            "example_ply": sp["example"][1],
+            "results": dict(Counter(results_by_spot[_fen_key(sp["fen"])])),
+        })
+        if len(trouble) >= 3:
+            break
+
+    curve_out = []
+    for move_no in sorted(curves):
+        vals = curves[move_no]
+        if len(vals) >= max(1, n // 3):
+            curve_out.append({"move": move_no, "avg_eval": round(sum(vals) / len(vals)), "n": len(vals)})
+    enough = max(min_games, (n + 1) // 2)
+    turning = next((c["move"] for c in curve_out if c["move"] > 0 and c["avg_eval"] <= -60 and c["n"] >= enough), None)
+    worst_drop = None
+    for prev, cur in zip(curve_out, curve_out[1:]):
+        drop = prev["avg_eval"] - cur["avg_eval"]
+        if cur["n"] >= enough and (worst_drop is None or drop > worst_drop[1]):
+            worst_drop = (cur["move"], drop)
+
+    avg_loss = sum(per_game_loss) / n
+    phase_avg = {p: round(sum(v) / n, 1) for p, v in phase_loss.items()}
+    avg_first = round(sum(first_error_moves) / len(first_error_moves)) if first_error_moves else None
+
+    errors_per_game = n_errors / n
+    avg_per_error = (sum(per_game_loss) / n_errors) if n_errors else 0.0
+    # one plain sentence a coach would say
+    worst_phase = max(phase_avg, key=phase_avg.get)
+    if n_errors:
+        parts = [f"Across {n} analysed game{'s' if n != 1 else ''} you make about {errors_per_game:.1f} engine-flagged "
+                 f"errors per game in this line, each costing {avg_per_error:.0f}% win chance on average, "
+                 f"mostly in the {worst_phase}."]
+    else:
+        parts = [f"Across {n} analysed game{'s' if n != 1 else ''} the engine found nothing to complain about in this line."]
+    if avg_first:
+        parts.append(f"On average the first slip comes at move {avg_first}.")
+    if turning:
+        parts.append(f"The evaluation typically turns against you around move {turning}.")
+    elif worst_drop and worst_drop[1] >= 40:
+        parts.append(f"The sharpest average drop happens at move {worst_drop[0]}.")
+    if trouble:
+        t = trouble[0]
+        tried = ", ".join(f"{x['san']} ({x['games']})" for x in t["tried"])
+        if t["repeated"]:
+            parts.append(f"Biggest trouble spot: the position before move {t['move']}, reached in {t['games']} games, "
+                         f"where you played {tried}" + (f"; the engine prefers {t['best_san']}." if t["best_san"] else "."))
+        else:
+            parts.append(f"You rarely reach the same position twice in this line; the costliest single moment was "
+                         f"before move {t['move']}, where you played {t['tried'][0]['san']}"
+                         + (f" instead of {t['best_san']}." if t["best_san"] else "."))
+    return {
+        "analyzed": n,
+        "win_loss_per_game": round(avg_loss, 1),
+        "errors_per_game": round(errors_per_game, 1),
+        "avg_loss_per_error": round(avg_per_error, 1),
+        "win_loss_by_phase": phase_avg,
+        "avg_first_error_move": avg_first,
+        "turning_move": turning,
+        "worst_drop_move": worst_drop[0] if worst_drop and worst_drop[1] >= 40 else None,
+        "eval_curve": curve_out,
+        "trouble_spots": trouble,
+        "summary": " ".join(parts),
+    }
+
+
 def opening_name_for(g: ParsedGame, ann: dict | None) -> tuple[str, str]:
     """chess.com's label when it has one (it knows deep lines), otherwise our book's name."""
     bk = (ann or {}).get("book") or {}
@@ -382,6 +527,7 @@ def openings_section(games: list[ParsedGame], analyzed_by_id: dict[str, dict], a
                     key = (fe["ply"], fe["san"])
                     first_errors[key] += 1
                     first_error_detail[key] = fe
+            e["deep_dive"] = opening_deep_dive(gs, analyzed_by_id, color)
             e["left_book_first"] = {"player": left["player"], "opponent": left["opponent"]}
             e["typical_mistakes"] = [
                 {"ply": k[0], "san": k[1], "games": n, "best_san": first_error_detail[k].get("best_san"),

@@ -94,6 +94,28 @@ def build_insights(r: dict[str, Any]) -> list[dict[str, Any]]:
                 "Play it more often and study a few master games in it to add ideas beyond move 10.",
                 impact=1.5, evidence={"opening": o, "color": color},
             ))
+        # the opening where the most win chance evaporates, with the position it usually happens in
+        dives = [o for o in op[color]["openings"] if o.get("deep_dive") and o["deep_dive"]["analyzed"] >= 4 and o["games"] >= 5]
+        dives.sort(key=lambda o: -o["deep_dive"]["win_loss_per_game"])
+        if dives and dives[0]["deep_dive"]["win_loss_per_game"] >= 25:
+            o = dives[0]
+            d = o["deep_dive"]
+            ins = _ins(
+                f"opening_trouble_{color}_{o['name']}", "openings", "high" if d["win_loss_per_game"] >= 40 else "medium",
+                f"{o['name']} is your most error-prone opening as {color}",
+                d["summary"],
+                "Set the trouble position up on a board and work out the plan, then play through the engine's "
+                "preferred move and the next few moves until they feel natural. One position learned properly "
+                "fixes every game that reaches it.",
+                impact=3 + d["win_loss_per_game"] / 8 + o["games"] / 10,
+                evidence={"opening": o["name"], "color": color, "deep_dive": {k: v for k, v in d.items() if k != "eval_curve"}},
+            )
+            if d["trouble_spots"]:
+                t = d["trouble_spots"][0]
+                ins["example"] = {"fen": t["fen"], "tried": t["tried"], "best": t["best"], "best_san": t["best_san"],
+                                  "side": color, "ply": t["ply"], "game_id": t["example_game_id"],
+                                  "caption": f"Reached in {t['games']} game{'s' if t['games'] != 1 else ''}."}
+            out.append(ins)
         if op[color]["games"] >= 30 and op[color]["distinct_openings"] > op[color]["games"] * 0.6:
             out.append(_ins(
                 f"opening_scatter_{color}", "openings", "medium",
@@ -366,6 +388,8 @@ def build_insights(r: dict[str, Any]) -> list[dict[str, Any]]:
             ))
     # a board to look at, wherever one exists
     for ins in out:
+        if ins.get("example"):
+            continue
         ex = None
         cat, iid = ins["category"], ins["id"]
         if iid == "hanging_pieces":
@@ -386,7 +410,7 @@ def build_insights(r: dict[str, Any]) -> list[dict[str, Any]]:
             ex = _example(r, "hung_piece", "allowed_mate", "collapsed")
         elif iid.startswith("phase_"):
             ex = ((r.get("accuracy") or {}).get("phase_examples") or {}).get(iid[len("phase_"):])
-        elif iid.startswith("opening_") and ins["evidence"].get("opening"):
+        elif iid.startswith("opening_") and isinstance(ins["evidence"].get("opening"), dict):
             tm = ins["evidence"]["opening"].get("typical_mistakes") or []
             if tm and tm[0].get("fen"):
                 m = tm[0]

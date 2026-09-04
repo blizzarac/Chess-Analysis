@@ -224,6 +224,7 @@ button, input { font: inherit; color: inherit; }
 .tile { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 0.8rem 1rem; }
 .tile .label { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--ink-3); font-weight: 600; }
 .tile .value { font-family: var(--font-display); font-size: 1.7rem; font-weight: 700; font-variant-numeric: tabular-nums; line-height: 1.2; }
+.tile .value.text { font-size: 1.25rem; }
 .tile .hint { color: var(--ink-3); font-size: 0.8rem; }
 .tile.good .value { color: var(--good); }
 .tile.bad .value { color: var(--bad); }

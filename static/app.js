@@ -15,7 +15,7 @@
   const evalText = cp => cp == null ? "–" : (Math.abs(cp) >= 990 ? (cp > 0 ? "+M" : "-M") : (cp / 100).toFixed(2).replace(/^(-?)/, (m, s) => s || "+"));
   const secs = s => s == null ? "–" : (s >= 60 ? `${Math.floor(s / 60)}m ${Math.round(s % 60)}s` : `${s.toFixed(0)}s`);
   const wdl = e => Charts.wdlBar(e.wins, e.draws, e.losses).outerHTML;
-  const tile = (label, value, hint, cls) => `<div class="tile ${cls || ""}"><div class="label">${esc(label)}</div><div class="value">${value}</div>${hint ? `<div class="hint">${esc(hint)}</div>` : ""}</div>`;
+  const tile = (label, value, hint, cls) => `<div class="tile ${cls || ""}"><div class="label">${esc(label)}</div><div class="value ${typeof value === "string" && /^[A-Za-z][a-z]{5,}/.test(value) ? "text" : ""}">${value}</div>${hint ? `<div class="hint">${esc(hint)}</div>` : ""}</div>`;
   const panel = (title, sub, body, extra) => `<section class="panel ${extra || ""}"><h3>${esc(title)}</h3>${sub ? `<div class="sub">${esc(sub)}</div>` : ""}${body}</section>`;
   const scoreClass = (s, base) => s == null ? "" : (s >= (base ?? 50) + 8 ? "good" : s <= (base ?? 50) - 8 ? "bad" : "");
   async function api(path, opts) {
@@ -35,12 +35,15 @@
     opts = opts || {};
     if (!ex || !ex.fen) return "";
     const alts = (ex.alts || []).filter(u => u !== ex.best);
-    const played = ex.uci ? `<span class="you">You played</span> ${esc(describe(ex.fen, ex.uci))}.` : "";
+    const tried = (ex.tried || []).filter(t => t.uci);
+    const played = tried.length
+      ? `<span class="you">You played</span> ${tried.map(t => `${esc(describe(ex.fen, t.uci))}${t.games ? ` (${t.games} game${t.games > 1 ? "s" : ""})` : ""}`).join("; ")}.`
+      : (ex.uci ? `<span class="you">You played</span> ${esc(describe(ex.fen, ex.uci))}.` : "");
     const better = ex.best && ex.best !== ex.uci ? ` <span class="better">Better</span>: ${esc(describe(ex.fen, ex.best))}.` : "";
     const also = alts.length ? ` <span class="alt">Also fine</span>: ${alts.map(u => esc(describe(ex.fen, u))).join("; ")}.` : "";
     const meta = [ex.ply ? `move ${Math.ceil(ex.ply / 2)}` : "", ex.opponent ? `vs ${esc(ex.opponent)}` : "", ex.date ? dateOf(ex.date) : "", ex.win_loss != null ? `lost ${fmt(ex.win_loss, 0)}% win chance` : ""].filter(Boolean).join(" · ");
     const link = ex.game_id ? ` <a data-game="${esc(ex.game_id)}" data-ply="${ex.ply || 0}">open in the game viewer ↗</a>` : "";
-    return `<div class="mini"><div class="mini-board" data-fen="${esc(ex.fen)}" data-uci="${esc(ex.uci || "")}" data-best="${esc(ex.best || "")}" data-alts="${esc(alts.join(","))}" data-side="${esc(ex.side || "white")}"></div>
+    return `<div class="mini"><div class="mini-board" data-fen="${esc(ex.fen)}" data-uci="${esc(ex.uci || "")}" data-tried="${esc(tried.map(t => t.uci).join(","))}" data-best="${esc(ex.best || "")}" data-alts="${esc(alts.join(","))}" data-side="${esc(ex.side || "white")}"></div>
       <div class="cap">${opts.title ? `<b>${esc(opts.title)}</b><br>` : ""}${ex.caption ? esc(ex.caption) + " " : ""}${played}${better}${also}${opts.extra || ""}<span class="meta">${meta}${link}</span></div></div>`;
   }
   function hydrateMinis(root) {
@@ -52,6 +55,7 @@
       const add = (u, color, mark) => { if (!u) return; arrows.push({ from: u.slice(0, 2), to: u.slice(2, 4), color }); if (mark) { marks[u.slice(0, 2)] = mark; marks[u.slice(2, 4)] = mark; } };
       (el.dataset.alts || "").split(",").filter(Boolean).forEach(u => add(u, "var(--info)"));
       add(el.dataset.best, "var(--good)");
+      (el.dataset.tried || "").split(",").filter(Boolean).forEach((u, i) => add(u, "var(--bad)", i === 0 ? "last" : null));
       add(el.dataset.uci, "var(--bad)", "last");
       b.setPosition(el.dataset.fen, marks, arrows);
     });
@@ -422,7 +426,7 @@
       return panel(`Your usual first slip as ${cap(color)}`, "The move where you most often first leave the engine's approval in your most played openings.", rows.map(o => miniBoard({ ...o.typical_mistakes[0], side: color, caption: `${o.name}: seen in ${o.typical_mistakes[0].games} game${o.typical_mistakes[0].games > 1 ? "s" : ""}.` }, { title: o.name })).join(""));
     };
     const table = (rows, color) => `<div class="table-wrap"><table class="data"><thead><tr><th>Opening</th><th class="num">Games</th><th>W / D / L</th><th class="num">Score</th><th class="num">Accuracy</th><th class="num">Eval after move 10</th><th>Where you first go wrong</th></tr></thead><tbody>
-      ${rows.map(o => `<tr class="clickable" data-open="${esc(o.example_ids[0] || "")}" title="Open the most recent game"><td>${esc(o.name)}${o.eco ? ` <span class="muted small">${esc(o.eco)}</span>` : ""}</td><td class="num">${o.games}</td><td>${wdl(o)}</td><td class="num ${scoreClass(o.score, base)}">${pct(o.score)}</td><td class="num">${fmt(o.accuracy)}</td><td class="num">${o.avg_eval_after_opening == null ? "–" : evalText(o.avg_eval_after_opening)}</td><td>${mistakes(o)}</td></tr>`).join("")}</tbody></table></div>`;
+      ${rows.map(o => `<tr class="clickable" data-open="${esc(o.example_ids[0] || "")}" data-name="${esc(o.name)}" data-color="${color}" title="${o.deep_dive ? "Show where you go wrong in this opening" : "Open the most recent game"}"><td>${esc(o.name)}${o.eco ? ` <span class="muted small">${esc(o.eco)}</span>` : ""}</td><td class="num">${o.games}</td><td>${wdl(o)}</td><td class="num ${scoreClass(o.score, base)}">${pct(o.score)}</td><td class="num">${fmt(o.accuracy)}</td><td class="num">${o.avg_eval_after_opening == null ? "–" : evalText(o.avg_eval_after_opening)}</td><td>${mistakes(o)}</td></tr>`).join("")}</tbody></table></div>`;
     const devs = color => {
       const d = op[color].deviations || [], lb = op[color].left_book_first || {};
       const intro = `<div class="sub">Against a compact book of ${"~200"} standard lines. You left the book first in ${lb.player || 0} games, your opponents in ${lb.opponent || 0}.</div>`;
@@ -435,10 +439,48 @@
       <div class="stack">${panel(`${cap(color)} repertoire map`, "The first five moves of each game, with how often each branch occurs and how it scores. Click a move to see the position.", `<div class="tree-with-board"><div class="tree" data-color="${color}">${treeHtml(op[color].tree, 0) || '<span class="muted">No games.</span>'}</div><div class="mini" id="tree-board-${color}"><div class="mini-board" data-fen="${esc(op[color].tree.fen || "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1")}" data-side="${color}"></div><div class="cap muted small">Starting position</div></div></div>`)}
       ${panel(`Where you leave theory as ${cap(color)}`, "", devs(color))}</div></div>
       ${mistakeBoards(color)}`;
+    const dives = [];
+    for (const color of ["white", "black"]) for (const o of op[color].openings) if (o.deep_dive) dives.push({ color, o });
+    dives.sort((a, b) => b.o.deep_dive.win_loss_per_game * Math.min(b.o.deep_dive.analyzed, 5) - a.o.deep_dive.win_loss_per_game * Math.min(a.o.deep_dive.analyzed, 5));
+    const diveOptions = dives.map((d, i) => `<option value="${i}">as ${cap(d.color)} · ${esc(d.o.name)} (${d.o.deep_dive.analyzed} analysed, ${fmt(d.o.deep_dive.errors_per_game, 1)} errors per game)</option>`).join("");
     mount(`${head("Openings", "What you actually play, and what it does to your results. Look for lines with many games and a low score: that is where a few hours of study pay off fastest.")}
       ${legend()}
+      ${dives.length ? `<section class="panel" id="dive"><h3>Where you go wrong in a specific opening</h3><div class="sub">Every engine-flagged error you made in games with this opening, at any point of the game, grouped by the position it happened in. Pick an opening or click a row in the tables below.</div>
+        <select id="dive-select" style="max-width:100%;padding:.4rem .6rem;border:1px solid var(--line-strong);border-radius:6px;background:var(--surface);color:var(--ink)">${diveOptions}</select>
+        <div id="dive-body" style="margin-top:1rem"></div></section>` : ""}
       ${side("white")}${side("black")}`);
-    document.querySelectorAll("tr[data-open]").forEach(tr => tr.addEventListener("click", () => tr.dataset.open && openGame(tr.dataset.open)));
+    const renderDive = i => {
+      const d = dives[i]; if (!d) return;
+      const o = d.o, dd = o.deep_dive, color = d.color;
+      const spots = dd.trouble_spots.map((t, k) => miniBoard({ fen: t.fen, tried: t.tried, best: t.best, side: color, ply: t.ply, game_id: t.example_game_id,
+        caption: `${cap(t.phase)}, before move ${t.move}, ${t.repeated ? `reached in ${t.games} games` : "seen once"}; ${t.repeated ? "on average " : ""}you lose ${fmt(t.avg_win_loss, 0)}% win chance here. Results from here: ${Object.entries(t.results).map(([r, n]) => `${n} ${r}${n > 1 && r !== "loss" ? "s" : n > 1 ? "es" : ""}`).join(", ")}.` },
+        { title: t.repeated ? `Trouble spot ${k + 1}` : `Costly moment ${k + 1}` })).join("");
+      $("#dive-body").innerHTML = `
+        <p style="font-size:1.05rem;max-width:80ch"><strong>${esc(o.name)} as ${cap(color)}.</strong> ${esc(dd.summary)}</p>
+        <div class="tiles">
+          ${tile("Games", o.games, `${dd.analyzed} engine-analysed`)}
+          ${tile("Score", pct(o.score), `${o.wins}W ${o.draws}D ${o.losses}L`, scoreClass(o.score, base))}
+          ${tile("Errors per game", fmt(dd.errors_per_game, 1), `each costing ${fmt(dd.avg_loss_per_error, 0)}% win chance on average`, dd.errors_per_game >= 3 ? "bad" : "")}
+          ${tile("Where the damage is", cap(Object.entries(dd.win_loss_by_phase).sort((a, b) => b[1] - a[1])[0][0]), `opening ${fmt(dd.win_loss_by_phase.opening, 0)} · middlegame ${fmt(dd.win_loss_by_phase.middlegame, 0)} · endgame ${fmt(dd.win_loss_by_phase.endgame, 0)} (win chance points per game)`)}
+          ${tile("First slip", dd.avg_first_error_move ? `move ${dd.avg_first_error_move}` : "–", "on average")}
+          ${tile("Turns against you", dd.turning_move ? `move ${dd.turning_move}` : (dd.worst_drop_move ? `move ${dd.worst_drop_move}` : "–"), dd.turning_move ? "average eval below −0.6" : dd.worst_drop_move ? "sharpest average drop" : "no typical collapse")}
+        </div>
+        <div class="grid-2" style="margin-top:1rem">
+          ${panel("Average evaluation by move", "From your side, averaged over the analysed games in this opening. Below zero means you are typically worse.", `<div id="dive-curve"></div>`)}
+          ${panel("Trouble spots", dd.trouble_spots.length ? (dd.trouble_spots.some(t => t.repeated) ? "Positions you reach repeatedly and get wrong. Red arrows are the moves you tried, green is the engine's choice." : "You rarely reach the same position twice in this line, so these are the single costliest moments.") : "The engine found no errors in this line.", spots || "")}
+        </div>`;
+      attachChart("dive-curve", Charts.lineChart({ series: [{ name: "Eval", points: dd.eval_curve.map(c => ({ x: c.move, y: c.avg_eval / 100, label: `After move ${c.move}: ${(c.avg_eval / 100).toFixed(2)} (${c.n} games)` })) }], height: 200, area: true, refY: 0, xFormat: x => `move ${Math.round(x)}`, yFormat: y => y.toFixed(1) }));
+      hydrateMinis($("#dive-body"));
+    };
+    if (dives.length) {
+      $("#dive-select").addEventListener("change", e => renderDive(+e.target.value));
+      renderDive(0);
+    }
+    document.querySelectorAll("tr[data-open]").forEach(tr => tr.addEventListener("click", () => {
+      const i = dives.findIndex(d => d.o.name === tr.dataset.name && d.color === tr.dataset.color);
+      if (i >= 0) { $("#dive-select").value = String(i); renderDive(i); $("#dive").scrollIntoView({ behavior: "smooth", block: "start" }); }
+      else if (tr.dataset.open) openGame(tr.dataset.open);
+    }));
     mount.treeBoards = {};
     document.querySelectorAll(".tree summary[data-fen]").forEach(sm => sm.addEventListener("click", e => {
       const color = sm.closest(".tree").dataset.color;
